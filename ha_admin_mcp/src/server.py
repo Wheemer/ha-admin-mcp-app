@@ -8,13 +8,16 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
+APP_VERSION = "0.1.4"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
+SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
 TEXT_EXTENSIONS = {
     ".conf",
     ".css",
@@ -404,6 +407,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.write_json({"ok": True, "dangerous": True})
             return
+        if self.path == "/api/mcp":
+            self.send_error(405, "SSE streams are not implemented")
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:
@@ -414,9 +420,23 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json({"error": "unauthorized"}, status=401)
             return
         length = int(self.headers.get("Content-Length", "0"))
-        request = json.loads(self.rfile.read(length) or b"{}")
-        response = self.handle_rpc(request)
-        self.write_json(response)
+        message = json.loads(self.rfile.read(length) or b"{}")
+        response = self.handle_message(message)
+        if response is None:
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        extra_headers = {}
+        if isinstance(message, dict) and message.get("method") == "initialize":
+            extra_headers["Mcp-Session-Id"] = str(uuid.uuid4())
+        self.write_json(response, headers=extra_headers)
+
+    def do_DELETE(self) -> None:
+        if self.path == "/api/mcp":
+            self.send_error(405, "Session termination is not implemented")
+            return
+        self.send_error(404)
 
     def authorized(self) -> bool:
         token = OPTIONS.get("admin_token") or ""
@@ -424,38 +444,53 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self.headers.get("Authorization") == f"Bearer {token}"
 
-    def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any]:
+    def handle_message(self, message: Any) -> Any | None:
+        if isinstance(message, list):
+            responses = [response for item in message if (response := self.handle_rpc(item)) is not None]
+            return responses or None
+        return self.handle_rpc(message)
+
+    def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         request_id = request.get("id")
         method = request.get("method")
         try:
             if method == "initialize":
+                params = request.get("params") or {}
+                requested_version = params.get("protocolVersion")
+                protocol_version = requested_version if requested_version in SUPPORTED_PROTOCOL_VERSIONS else "2025-03-26"
                 result = {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": "ha-admin-mcp", "version": "0.1.0"},
-                    "capabilities": {"tools": {}},
+                    "protocolVersion": protocol_version,
+                    "serverInfo": {"name": "ha-admin-mcp", "version": APP_VERSION},
+                    "capabilities": {"tools": {"listChanged": True}},
                 }
             elif method == "tools/list":
                 result = {"tools": TOOLS}
             elif method == "tools/call":
                 params = request.get("params") or {}
                 result = call_tool(params["name"], params.get("arguments") or {})
-            elif method in {"ping", "notifications/initialized"}:
+            elif method == "ping":
                 result = {}
+            elif method == "notifications/initialized":
+                return None
             else:
                 raise ValueError(f"Unsupported method: {method}")
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except Exception as err:
+            if request_id is None:
+                return None
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {"code": -32000, "message": str(err)},
             }
 
-    def write_json(self, payload: Any, status: int = 200) -> None:
+    def write_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload, default=str).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
