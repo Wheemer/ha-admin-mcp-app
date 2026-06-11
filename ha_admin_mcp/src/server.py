@@ -14,10 +14,11 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
+S6_ENV_DIR = Path("/run/s6/container_environment")
 TEXT_EXTENSIONS = {
     ".conf",
     ".css",
@@ -52,6 +53,19 @@ def load_options() -> dict[str, Any]:
 OPTIONS = load_options()
 
 
+def get_supervisor_token() -> str:
+    for name in ("SUPERVISOR_TOKEN", "HASSIO_TOKEN"):
+        token = os.environ.get(name)
+        if token:
+            return token.strip()
+        token_file = S6_ENV_DIR / name
+        if token_file.exists():
+            value = token_file.read_text().strip()
+            if value:
+                return value
+    raise RuntimeError("SUPERVISOR_TOKEN/HASSIO_TOKEN is not available")
+
+
 def text_result(value: Any) -> dict[str, Any]:
     text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
     return {"content": [{"type": "text", "text": text}]}
@@ -82,9 +96,7 @@ def read_limited(path: Path, max_bytes: int = MAX_READ_BYTES) -> tuple[str, bool
 
 
 def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> Any:
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        raise RuntimeError("SUPERVISOR_TOKEN is not available")
+    token = get_supervisor_token()
     endpoint = "/" + endpoint.lstrip("/")
     body = None if data is None else json.dumps(data).encode()
     request = urllib.request.Request(
@@ -106,9 +118,7 @@ def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> A
 
 
 def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        raise RuntimeError("SUPERVISOR_TOKEN is not available")
+    token = get_supervisor_token()
     endpoint = "/" + endpoint.lstrip("/")
     body = None if data is None else json.dumps(data).encode()
     request = urllib.request.Request(
