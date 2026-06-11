@@ -1,7 +1,7 @@
 name: HA Admin MCP
 slug: ha_admin_mcp
 description: EXTREMELY DANGEROUS privileged MCP server for full Home Assistant administration
-version: 0.1.1
+version: 0.1.2
 url: https://github.com/Wheemer/ha-admin-mcp-app
 arch:
   - aarch64
@@ -22,13 +22,13 @@ map:
   - ssl:rw
   - addons:rw
 ports:
-  8099/tcp: 8099
+  8124/tcp: 8124
 ports_description:
-  8099/tcp: MCP JSON-RPC HTTP endpoint
+  8124/tcp: MCP JSON-RPC HTTP endpoint
 options:
   admin_token: ""
   bind_host: 0.0.0.0
-  port: 8099
+  port: 8124
   command_timeout_seconds: 300
 schema:
   admin_token: str?

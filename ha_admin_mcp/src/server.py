@@ -41,7 +41,7 @@ def load_options() -> dict[str, Any]:
     return {
         "admin_token": os.environ.get("ADMIN_TOKEN", ""),
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
-        "port": int(os.environ.get("PORT", "8099")),
+        "port": int(os.environ.get("PORT", "8124")),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
     }
 
@@ -407,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
-        if self.path != "/mcp":
+        if self.path not in {"/mcp", "/api/mcp"}:
             self.send_error(404)
             return
         if not self.authorized():
@@ -465,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     host = str(OPTIONS.get("bind_host") or "0.0.0.0")
-    port = int(OPTIONS.get("port") or 8099)
+    port = int(OPTIONS.get("port") or 8124)
     print(
         "[ha-admin-mcp] EXTREMELY DANGEROUS server listening on "
         f"{host}:{port}; installing and starting this app grants admin MCP access",
