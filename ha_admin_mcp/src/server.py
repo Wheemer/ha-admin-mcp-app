@@ -407,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
-        if self.path not in {"/mcp", "/api/mcp"}:
+        if self.path != "/api/mcp":
             self.send_error(404)
             return
         if not self.authorized():

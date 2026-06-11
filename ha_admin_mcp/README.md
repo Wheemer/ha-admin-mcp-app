@@ -16,8 +16,6 @@ The app exposes a JSON-RPC MCP endpoint:
 POST http://HOME_ASSISTANT_HOST:8124/api/mcp
 ```
 
-The shorter `/mcp` path is also accepted.
-
 If `admin_token` is set, pass it as:
 
 ```text
