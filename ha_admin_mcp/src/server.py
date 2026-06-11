@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.5"
+APP_VERSION = "0.1.6"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
@@ -473,7 +473,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"resourceTemplates": []}
             elif method == "tools/call":
                 params = request.get("params") or {}
-                result = call_tool(params["name"], params.get("arguments") or {})
+                result = text_result(call_tool(params["name"], params.get("arguments") or {}))
             elif method == "ping":
                 result = {}
             elif method == "notifications/initialized":
