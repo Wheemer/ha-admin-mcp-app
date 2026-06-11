@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
@@ -465,6 +465,12 @@ class Handler(BaseHTTPRequestHandler):
                 }
             elif method == "tools/list":
                 result = {"tools": TOOLS}
+            elif method == "prompts/list":
+                result = {"prompts": []}
+            elif method == "resources/list":
+                result = {"resources": []}
+            elif method == "resources/templates/list":
+                result = {"resourceTemplates": []}
             elif method == "tools/call":
                 params = request.get("params") or {}
                 result = call_tool(params["name"], params.get("arguments") or {})
@@ -473,16 +479,21 @@ class Handler(BaseHTTPRequestHandler):
             elif method == "notifications/initialized":
                 return None
             else:
-                raise ValueError(f"Unsupported method: {method}")
+                return self.rpc_error(request_id, -32601, f"Method not found: {method}")
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
         except Exception as err:
             if request_id is None:
                 return None
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32000, "message": str(err)},
-            }
+            return self.rpc_error(request_id, -32000, str(err))
+
+    def rpc_error(self, request_id: Any, code: int, message: str) -> dict[str, Any] | None:
+        if request_id is None:
+            return None
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+        }
 
     def write_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload, default=str).encode()
