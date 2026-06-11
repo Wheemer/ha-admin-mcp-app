@@ -1,0 +1,41 @@
+name: HA Admin MCP
+slug: ha_admin_mcp
+description: EXTREMELY DANGEROUS privileged MCP server for full Home Assistant administration
+version: 0.1.0
+url: https://github.com/local/ha-admin-mcp-addon
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+startup: services
+boot: manual
+init: false
+host_network: true
+full_access: true
+apparmor: false
+hassio_api: true
+hassio_role: admin
+homeassistant_api: true
+map:
+  - addon_config:rw
+  - backup:rw
+  - config:rw
+  - share:rw
+  - ssl:rw
+  - addons:rw
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: MCP JSON-RPC HTTP endpoint
+options:
+  admin_token: ""
+  bind_host: 0.0.0.0
+  port: 8099
+  command_timeout_seconds: 300
+schema:
+  admin_token: str?
+  bind_host: str
+  port: int(1,65535)
+  command_timeout_seconds: int(1,3600)

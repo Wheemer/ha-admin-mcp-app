@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+echo "[ha-admin-mcp] Starting EXTREMELY DANGEROUS privileged MCP server"
+exec python3 /app/src/server.py
