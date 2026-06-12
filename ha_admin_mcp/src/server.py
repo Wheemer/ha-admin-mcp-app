@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import base64
 import json
 import os
 import shutil
@@ -8,17 +9,21 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
+import glob
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
+MCP_PATH = "/api/mcp"
 TEXT_EXTENSIONS = {
     ".conf",
     ".css",
@@ -71,6 +76,18 @@ def text_result(value: Any) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": text}]}
 
 
+def image_result(data: bytes, mime_type: str = "image/png") -> dict[str, Any]:
+    return {
+        "content": [
+            {
+                "type": "image",
+                "mimeType": mime_type,
+                "data": base64.b64encode(data).decode(),
+            }
+        ]
+    }
+
+
 def path_info(path: Path) -> dict[str, Any]:
     stat = path.lstat()
     return {
@@ -95,6 +112,14 @@ def read_limited(path: Path, max_bytes: int = MAX_READ_BYTES) -> tuple[str, bool
     return data.decode("utf-8", errors="replace"), truncated
 
 
+def read_bytes_limited(path: Path, max_bytes: int = MAX_READ_BYTES) -> tuple[bytes, bool]:
+    data = path.read_bytes()
+    truncated = len(data) > max_bytes
+    if truncated:
+        data = data[:max_bytes]
+    return data, truncated
+
+
 def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> Any:
     token = get_supervisor_token()
     endpoint = "/" + endpoint.lstrip("/")
@@ -111,10 +136,23 @@ def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> A
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = response.read().decode()
-            return json.loads(payload) if payload else {"status": response.status}
+            if not payload:
+                return {"status": response.status}
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                return {"status": response.status, "content": payload}
     except urllib.error.HTTPError as err:
         payload = err.read().decode(errors="replace")
         raise RuntimeError(f"Supervisor API {err.code}: {payload}") from err
+
+
+def maybe_query(endpoint: str, query: dict[str, Any]) -> str:
+    clean = {key: value for key, value in query.items() if value not in (None, "")}
+    if not clean:
+        return endpoint
+    separator = "&" if "?" in endpoint else "?"
+    return endpoint + separator + urllib.parse.urlencode(clean)
 
 
 def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
@@ -133,7 +171,12 @@ def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
             payload = response.read().decode()
-            return json.loads(payload) if payload else {"status": response.status}
+            if not payload:
+                return {"status": response.status}
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                return {"status": response.status, "content": payload}
     except urllib.error.HTTPError as err:
         payload = err.read().decode(errors="replace")
         raise RuntimeError(f"Home Assistant API {err.code}: {payload}") from err
@@ -163,6 +206,24 @@ TOOLS = [
         },
         ["command"],
     ),
+    tool_schema(
+        "run_shell",
+        "Run an arbitrary shell command with an explicit shell executable",
+        {
+            "command": {"type": "string"},
+            "shell": {"type": "string"},
+            "cwd": {"type": "string"},
+            "timeout": {"type": "integer", "minimum": 1, "maximum": 3600},
+            "max_output_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+        },
+        ["command"],
+    ),
+    tool_schema(
+        "get_environment",
+        "Return selected process and s6 environment values, redacting token contents",
+        {"include_values": {"type": "boolean"}},
+        [],
+    ),
     tool_schema("stat_path", "Return filesystem metadata for any visible path", {"path": {"type": "string"}}, ["path"]),
     tool_schema(
         "list_dir",
@@ -175,6 +236,18 @@ TOOLS = [
         "Read a file visible to the app",
         {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
         ["path"],
+    ),
+    tool_schema(
+        "read_file_base64",
+        "Read any visible file as base64 for binary-safe transfer",
+        {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
+        ["path"],
+    ),
+    tool_schema(
+        "write_file_base64",
+        "Write a visible file from base64 content, creating parent directories if needed",
+        {"path": {"type": "string"}, "content_base64": {"type": "string"}, "mode": {"type": "string"}},
+        ["path", "content_base64"],
     ),
     tool_schema(
         "write_file",
@@ -202,6 +275,18 @@ TOOLS = [
         ["path"],
     ),
     tool_schema(
+        "glob_paths",
+        "Expand filesystem glob patterns visible to the app",
+        {"pattern": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        ["pattern"],
+    ),
+    tool_schema(
+        "hash_file",
+        "Return cryptographic hashes for a visible file",
+        {"path": {"type": "string"}, "algorithm": {"type": "string"}},
+        ["path"],
+    ),
+    tool_schema(
         "ha_api",
         "Call the Home Assistant REST API through the Supervisor token",
         {"method": {"type": "string"}, "endpoint": {"type": "string"}, "data": {"type": "object"}},
@@ -214,8 +299,89 @@ TOOLS = [
         ["endpoint"],
     ),
     tool_schema("check_config", "Run Home Assistant Core config check through Supervisor", {}, []),
+    tool_schema("core_info", "Return Home Assistant Core info through Supervisor", {}, []),
+    tool_schema("host_info", "Return Home Assistant host info through Supervisor", {}, []),
+    tool_schema("supervisor_info", "Return Supervisor info", {}, []),
+    tool_schema("store_info", "Return Supervisor store/repository info", {}, []),
+    tool_schema(
+        "app_info",
+        "Return Supervisor app/add-on info for a slug",
+        {"slug": {"type": "string"}},
+        ["slug"],
+    ),
+    tool_schema(
+        "app_logs",
+        "Return Supervisor app/add-on logs for a slug",
+        {"slug": {"type": "string"}},
+        ["slug"],
+    ),
+    tool_schema(
+        "app_control",
+        "Start, stop, restart, rebuild, update, install, or uninstall a Supervisor app/add-on by slug",
+        {
+            "slug": {"type": "string"},
+            "action": {"type": "string", "enum": ["start", "stop", "restart", "rebuild", "update", "install", "uninstall"]},
+        },
+        ["slug", "action"],
+    ),
     tool_schema("restart_core", "Restart Home Assistant Core through Supervisor", {}, []),
+    tool_schema("stop_core", "Stop Home Assistant Core through Supervisor", {}, []),
+    tool_schema("start_core", "Start Home Assistant Core through Supervisor", {}, []),
     tool_schema("reload_core_config", "Reload Home Assistant core config through REST API", {}, []),
+    tool_schema(
+        "reload_domain_config",
+        "Reload a Home Assistant integration domain through /api/services/<domain>/reload when available",
+        {"domain": {"type": "string"}, "data": {"type": "object"}},
+        ["domain"],
+    ),
+    tool_schema(
+        "call_service",
+        "Call any Home Assistant service",
+        {"domain": {"type": "string"}, "service": {"type": "string"}, "data": {"type": "object"}},
+        ["domain", "service"],
+    ),
+    tool_schema(
+        "get_states",
+        "Return all Home Assistant states or one entity state",
+        {"entity_id": {"type": "string"}},
+        [],
+    ),
+    tool_schema(
+        "get_events",
+        "Return Home Assistant event names",
+        {},
+        [],
+    ),
+    tool_schema(
+        "get_services",
+        "Return Home Assistant service descriptions",
+        {},
+        [],
+    ),
+    tool_schema(
+        "get_history",
+        "Return Home Assistant history for optional entity ids",
+        {
+            "timestamp": {"type": "string"},
+            "filter_entity_id": {"type": "string"},
+            "minimal_response": {"type": "boolean"},
+            "no_attributes": {"type": "boolean"},
+            "significant_changes_only": {"type": "boolean"},
+        },
+        [],
+    ),
+    tool_schema(
+        "render_template",
+        "Render a Home Assistant template",
+        {"template": {"type": "string"}},
+        ["template"],
+    ),
+    tool_schema(
+        "fire_event",
+        "Fire a Home Assistant event",
+        {"event_type": {"type": "string"}, "event_data": {"type": "object"}},
+        ["event_type"],
+    ),
     tool_schema(
         "backup_path",
         "Copy a visible file or directory into /backup/ha-admin-mcp",
@@ -241,6 +407,24 @@ TOOLS = [
         {"include_content": {"type": "boolean"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
         [],
     ),
+    tool_schema(
+        "write_storage_key",
+        "Write a Home Assistant .storage key from JSON data or raw content",
+        {"key": {"type": "string"}, "data": {"type": "object"}, "content": {"type": "string"}, "mode": {"type": "string"}},
+        ["key"],
+    ),
+    tool_schema(
+        "delete_storage_key",
+        "Delete a Home Assistant .storage key",
+        {"key": {"type": "string"}},
+        ["key"],
+    ),
+    tool_schema(
+        "backup_storage_key",
+        "Copy a Home Assistant .storage key into /backup/ha-admin-mcp",
+        {"key": {"type": "string"}, "label": {"type": "string"}},
+        ["key"],
+    ),
 ]
 
 
@@ -265,6 +449,30 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
             "stdout_truncated": len(completed.stdout) > max_output,
             "stderr_truncated": len(completed.stderr) > max_output,
         }
+    if name == "run_shell":
+        timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
+        max_output = int(args.get("max_output_bytes") or 20000)
+        completed = subprocess.run(
+            args["command"],
+            cwd=args.get("cwd") or None,
+            shell=True,
+            executable=args.get("shell") or None,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        return {
+            "command": args["command"],
+            "shell": args.get("shell"),
+            "cwd": args.get("cwd"),
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[:max_output],
+            "stderr": completed.stderr[:max_output],
+            "stdout_truncated": len(completed.stdout) > max_output,
+            "stderr_truncated": len(completed.stderr) > max_output,
+        }
+    if name == "get_environment":
+        return get_environment(bool(args.get("include_values")))
     if name == "stat_path":
         path = Path(args["path"])
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
@@ -275,10 +483,20 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "read_file":
         content, truncated = read_limited(Path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
         return {"path": args["path"], "content": content, "truncated": truncated}
+    if name == "read_file_base64":
+        data, truncated = read_bytes_limited(Path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
+        return {"path": args["path"], "content_base64": base64.b64encode(data).decode(), "truncated": truncated}
     if name == "write_file":
         path = Path(args["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"])
+        if args.get("mode"):
+            path.chmod(int(str(args["mode"]), 8))
+        return path_info(path)
+    if name == "write_file_base64":
+        path = Path(args["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(args["content_base64"]))
         if args.get("mode"):
             path.chmod(int(str(args["mode"]), 8))
         return path_info(path)
@@ -294,16 +512,69 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return {"path": str(path), "deleted": True}
     if name == "search_files":
         return search_files(args)
+    if name == "glob_paths":
+        return glob_paths(args["pattern"], int(args.get("limit") or 500))
+    if name == "hash_file":
+        return hash_file(Path(args["path"]), args.get("algorithm") or "sha256")
     if name == "ha_api":
         return ha_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
     if name == "supervisor_api":
         return supervisor_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
     if name == "check_config":
         return supervisor_request("POST", "/core/check")
+    if name == "core_info":
+        return supervisor_request("GET", "/core/info")
+    if name == "host_info":
+        return supervisor_request("GET", "/host/info")
+    if name == "supervisor_info":
+        return supervisor_request("GET", "/supervisor/info")
+    if name == "store_info":
+        return supervisor_request("GET", "/store")
+    if name == "app_info":
+        return supervisor_request("GET", f"/addons/{args['slug']}/info")
+    if name == "app_logs":
+        return supervisor_request("GET", f"/addons/{args['slug']}/logs")
+    if name == "app_control":
+        return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
     if name == "restart_core":
         return supervisor_request("POST", "/core/restart")
+    if name == "stop_core":
+        return supervisor_request("POST", "/core/stop")
+    if name == "start_core":
+        return supervisor_request("POST", "/core/start")
     if name == "reload_core_config":
         return ha_request("POST", "/services/homeassistant/reload_core_config")
+    if name == "reload_domain_config":
+        return ha_request("POST", f"/services/{args['domain']}/reload", args.get("data") or {})
+    if name == "call_service":
+        return ha_request("POST", f"/services/{args['domain']}/{args['service']}", args.get("data") or {})
+    if name == "get_states":
+        entity_id = args.get("entity_id")
+        return ha_request("GET", f"/states/{entity_id}" if entity_id else "/states")
+    if name == "get_events":
+        return ha_request("GET", "/events")
+    if name == "get_services":
+        return ha_request("GET", "/services")
+    if name == "get_history":
+        endpoint = "/history/period"
+        if args.get("timestamp"):
+            endpoint += f"/{urllib.parse.quote(str(args['timestamp']), safe=':TZ+-')}"
+        endpoint = maybe_query(
+            endpoint,
+            {
+                "filter_entity_id": args.get("filter_entity_id"),
+                "minimal_response": str(bool(args.get("minimal_response"))).lower() if "minimal_response" in args else None,
+                "no_attributes": str(bool(args.get("no_attributes"))).lower() if "no_attributes" in args else None,
+                "significant_changes_only": str(bool(args.get("significant_changes_only"))).lower()
+                if "significant_changes_only" in args
+                else None,
+            },
+        )
+        return ha_request("GET", endpoint)
+    if name == "render_template":
+        return ha_request("POST", "/template", {"template": args["template"]})
+    if name == "fire_event":
+        return ha_request("POST", f"/events/{args['event_type']}", args.get("event_data") or {})
     if name == "backup_path":
         return backup_path(Path(args["path"]), args.get("label"))
     if name == "list_storage_keys":
@@ -314,7 +585,50 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_storage_key(args["key"], args["query"], int(args.get("limit") or 50))
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "write_storage_key":
+        return write_storage_key(args["key"], args)
+    if name == "delete_storage_key":
+        path = storage_path(args["key"])
+        path.unlink()
+        return {"key": args["key"], "path": str(path), "deleted": True}
+    if name == "backup_storage_key":
+        return backup_path(storage_path(args["key"]), args.get("label") or args["key"])
     raise ValueError(f"Unknown tool: {name}")
+
+
+def get_environment(include_values: bool) -> dict[str, Any]:
+    def redact(name: str, value: str) -> str:
+        if include_values and not any(token in name.upper() for token in ("TOKEN", "SECRET", "PASSWORD", "KEY")):
+            return value
+        return f"<redacted:{len(value)}>"
+
+    rows: dict[str, Any] = {"process": {}, "s6": {}}
+    for key, value in sorted(os.environ.items()):
+        rows["process"][key] = redact(key, value)
+    if S6_ENV_DIR.exists():
+        for path in sorted(S6_ENV_DIR.iterdir()):
+            if path.is_file():
+                value = path.read_text(errors="replace").strip()
+                rows["s6"][path.name] = redact(path.name, value)
+    return rows
+
+
+def glob_paths(pattern: str, limit: int) -> list[dict[str, Any]]:
+    rows = []
+    for match in glob.iglob(pattern, recursive=True):
+        if len(rows) >= limit:
+            break
+        path = Path(match)
+        rows.append(path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False})
+    return rows
+
+
+def hash_file(path: Path, algorithm: str) -> dict[str, Any]:
+    digest = hashlib.new(algorithm)
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"path": str(path), "algorithm": algorithm, "hexdigest": digest.hexdigest(), "size": path.stat().st_size}
 
 
 def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
@@ -360,7 +674,7 @@ def backup_path(path: Path, label: str | None) -> dict[str, Any]:
 
 
 def storage_path(key: str) -> Path:
-    if "/" in key or "\\" in key or key in {"secrets", "auth"}:
+    if "/" in key or "\\" in key:
         raise ValueError("Invalid storage key")
     return Path("/config/.storage") / key
 
@@ -383,6 +697,18 @@ def read_storage_key(key: str, max_bytes: int) -> dict[str, Any]:
     except json.JSONDecodeError:
         parsed = content
     return {"key": key, "path": str(path), "truncated": truncated, "data": parsed}
+
+
+def write_storage_key(key: str, args: dict[str, Any]) -> dict[str, Any]:
+    path = storage_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if "content" in args and args["content"] is not None:
+        path.write_text(str(args["content"]))
+    else:
+        path.write_text(json.dumps(args.get("data"), indent=2, default=str))
+    if args.get("mode"):
+        path.chmod(int(str(args["mode"]), 8))
+    return path_info(path) | {"key": key}
 
 
 def search_storage_key(key: str, query: str, limit: int) -> list[dict[str, Any]]:
@@ -417,13 +743,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.write_json({"ok": True, "dangerous": True})
             return
-        if self.path == "/api/mcp":
+        if self.path == MCP_PATH:
             self.send_error(405, "SSE streams are not implemented")
             return
         self.send_error(404)
 
     def do_POST(self) -> None:
-        if self.path != "/api/mcp":
+        if self.path != MCP_PATH:
             self.send_error(404)
             return
         if not self.authorized():
@@ -443,7 +769,7 @@ class Handler(BaseHTTPRequestHandler):
         self.write_json(response, headers=extra_headers)
 
     def do_DELETE(self) -> None:
-        if self.path == "/api/mcp":
+        if self.path == MCP_PATH:
             self.send_error(405, "Session termination is not implemented")
             return
         self.send_error(404)
