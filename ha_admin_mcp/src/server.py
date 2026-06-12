@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
@@ -408,6 +408,19 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "save_lovelace_dashboard",
+        "Save a Lovelace dashboard storage key, optionally backing up the previous file under /backup/ha-admin-mcp",
+        {
+            "key": {"type": "string"},
+            "data": {"type": "object"},
+            "content": {"type": "string"},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "mode": {"type": "string"},
+        },
+        ["key"],
+    ),
+    tool_schema(
         "write_storage_key",
         "Write a Home Assistant .storage key from JSON data or raw content",
         {"key": {"type": "string"}, "data": {"type": "object"}, "content": {"type": "string"}, "mode": {"type": "string"}},
@@ -585,6 +598,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_storage_key(args["key"], args["query"], int(args.get("limit") or 50))
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "save_lovelace_dashboard":
+        return save_lovelace_dashboard(args["key"], args)
     if name == "write_storage_key":
         return write_storage_key(args["key"], args)
     if name == "delete_storage_key":
@@ -734,6 +749,26 @@ def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str,
             row["truncated"] = truncated
         dashboards.append(row)
     return {"count": len(dashboards), "dashboards": dashboards}
+
+
+def lovelace_storage_path(key: str) -> Path:
+    if not (key == "lovelace_dashboards" or key == "lovelace_resources" or key.startswith("lovelace.")):
+        raise ValueError("Lovelace dashboard keys must be lovelace.*, lovelace_dashboards, or lovelace_resources")
+    return storage_path(key)
+
+
+def save_lovelace_dashboard(key: str, args: dict[str, Any]) -> dict[str, Any]:
+    path = lovelace_storage_path(key)
+    backup = None
+    if bool(args.get("backup", True)) and path.exists():
+        backup = backup_path(path, args.get("label") or key)
+    if "content" in args and args["content"] is not None:
+        path.write_text(str(args["content"]))
+    else:
+        path.write_text(json.dumps(args.get("data"), indent=2, default=str))
+    if args.get("mode"):
+        path.chmod(int(str(args["mode"]), 8))
+    return path_info(path) | {"key": key, "backup": backup}
 
 
 class Handler(BaseHTTPRequestHandler):
