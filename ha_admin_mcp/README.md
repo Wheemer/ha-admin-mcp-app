@@ -24,25 +24,16 @@ Authorization: Bearer YOUR_TOKEN
 
 There is no extra safety checkbox. Installing and starting this app is the explicit danger acceptance.
 
-## Main Tools
+## Main Tool Groups
 
-- `run_command`
-- `read_file`
-- `write_file`
-- `delete_path`
-- `list_dir`
-- `stat_path`
-- `search_files`
-- `ha_api`
-- `supervisor_api`
-- `check_config`
-- `restart_core`
-- `reload_core_config`
-- `backup_path`
-- `list_storage_keys`
-- `read_storage_key`
-- `search_storage_key`
-- `read_lovelace_dashboards`
+- Shell and host control: `run_command`, `run_shell`, `get_environment`
+- Filesystem control: `stat_path`, `list_dir`, `read_file`, `read_file_base64`, `write_file`, `write_file_base64`, `delete_path`, `search_files`, `glob_paths`, `hash_file`
+- Home Assistant APIs: `ha_api`, `supervisor_api`, `call_service`, `get_states`, `get_events`, `get_services`, `get_history`, `render_template`, `fire_event`
+- Supervisor/Core operations: `check_config`, `check_reload_readiness`, `core_info`, `host_info`, `supervisor_info`, `store_info`, `app_info`, `app_logs`, `app_control`, `restart_core`, `stop_core`, `start_core`, `reload_core_config`, `reload_domain_config`
+- Config files: `list_config_files`, `read_config_file`, `write_config_file`, `search_config`, `tail_log`
+- Storage and registries: `list_storage_keys`, `list_storage_keys_filtered`, `read_storage_key`, `search_storage_key`, `search_storage_json`, `write_storage_key`, `delete_storage_key`, `backup_storage_key`, `search_entity_registry`, `get_entity_registry_entry`, `search_device_registry`, `search_config_entries`
+- Lovelace dashboards: `read_lovelace_dashboards`, `list_lovelace_dashboards`, `get_lovelace_dashboard`, `get_lovelace_view`, `get_lovelace_card`, `find_lovelace_cards`, `patch_lovelace_card`, `save_lovelace_dashboard`, `delete_lovelace_dashboard`
+- Backups: `backup_path`
 
 ## Backup Policy
 
