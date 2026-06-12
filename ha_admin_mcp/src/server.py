@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.1.10"
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
@@ -408,17 +408,49 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "list_lovelace_dashboards",
+        "List Lovelace dashboards from HA's dashboard registry with matching storage keys",
+        {"include_config": {"type": "boolean"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
+        [],
+    ),
+    tool_schema(
+        "get_lovelace_dashboard",
+        "Read one Lovelace dashboard by id, url_path, or storage key",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
+        },
+        [],
+    ),
+    tool_schema(
         "save_lovelace_dashboard",
-        "Save a Lovelace dashboard storage key, optionally backing up the previous file under /backup/ha-admin-mcp",
+        "Create or update a Lovelace dashboard by id or url_path and save its config/views",
         {
             "key": {"type": "string"},
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "title": {"type": "string"},
+            "icon": {"type": "string"},
+            "show_in_sidebar": {"type": "boolean"},
+            "require_admin": {"type": "boolean"},
+            "config": {"type": "object"},
+            "views": {"type": "array"},
             "data": {"type": "object"},
             "content": {"type": "string"},
+            "create": {"type": "boolean"},
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
             "mode": {"type": "string"},
         },
-        ["key"],
+        [],
+    ),
+    tool_schema(
+        "delete_lovelace_dashboard",
+        "Delete a Lovelace dashboard registry entry and storage file by id, url_path, or key",
+        {"id": {"type": "string"}, "url_path": {"type": "string"}, "key": {"type": "string"}, "backup": {"type": "boolean"}},
+        [],
     ),
     tool_schema(
         "write_storage_key",
@@ -598,8 +630,14 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_storage_key(args["key"], args["query"], int(args.get("limit") or 50))
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "list_lovelace_dashboards":
+        return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "get_lovelace_dashboard":
+        return get_lovelace_dashboard(args, int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "save_lovelace_dashboard":
-        return save_lovelace_dashboard(args["key"], args)
+        return save_lovelace_dashboard(args)
+    if name == "delete_lovelace_dashboard":
+        return delete_lovelace_dashboard(args)
     if name == "write_storage_key":
         return write_storage_key(args["key"], args)
     if name == "delete_storage_key":
@@ -751,24 +789,202 @@ def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str,
     return {"count": len(dashboards), "dashboards": dashboards}
 
 
+def load_storage_json(key: str) -> dict[str, Any]:
+    path = storage_path(key)
+    if not path.exists():
+        return {"version": 1, "minor_version": 1, "key": key, "data": {}}
+    return json.loads(path.read_text(errors="replace"))
+
+
+def dump_storage_json(key: str, data: dict[str, Any], mode: str | None = None) -> dict[str, Any]:
+    path = storage_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, default=str))
+    if mode:
+        path.chmod(int(str(mode), 8))
+    return path_info(path) | {"key": key}
+
+
+def lovelace_dashboard_id_from_key(key: str) -> str:
+    if key == "lovelace":
+        return "lovelace"
+    if key.startswith("lovelace."):
+        return key.removeprefix("lovelace.")
+    raise ValueError("Dashboard storage key must be lovelace.<id>")
+
+
+def lovelace_dashboard_key(dashboard_id: str) -> str:
+    return f"lovelace.{dashboard_id}"
+
+
+def make_dashboard_id(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "_" for ch in value.strip())
+    cleaned = "_".join(part for part in cleaned.split("_") if part)
+    if not cleaned:
+        raise ValueError("Dashboard id/url_path cannot be empty")
+    return cleaned
+
+
+def load_lovelace_registry() -> dict[str, Any]:
+    registry = load_storage_json("lovelace_dashboards")
+    registry.setdefault("version", 1)
+    registry.setdefault("minor_version", 1)
+    registry["key"] = "lovelace_dashboards"
+    registry.setdefault("data", {})
+    registry["data"].setdefault("items", [])
+    return registry
+
+
+def dashboard_item_key(item: dict[str, Any]) -> str:
+    return lovelace_dashboard_key(item["id"])
+
+
+def resolve_lovelace_dashboard(args: dict[str, Any], allow_missing: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    registry = load_lovelace_registry()
+    items = registry["data"]["items"]
+    wanted_id = args.get("id")
+    wanted_url = args.get("url_path")
+    wanted_key = args.get("key")
+    if wanted_key and not wanted_id:
+        wanted_id = lovelace_dashboard_id_from_key(wanted_key)
+    item = None
+    for candidate in items:
+        if wanted_id and candidate.get("id") == wanted_id:
+            item = candidate
+            break
+        if wanted_url and candidate.get("url_path") == wanted_url:
+            item = candidate
+            break
+    if item or not allow_missing:
+        return registry, item
+    dashboard_id = wanted_id or make_dashboard_id(wanted_url or args.get("title") or "")
+    url_path = wanted_url or dashboard_id.replace("_", "-")
+    item = {
+        "id": dashboard_id,
+        "url_path": url_path,
+        "title": args.get("title") or url_path.replace("-", " ").title(),
+        "require_admin": bool(args.get("require_admin", False)),
+        "show_in_sidebar": bool(args.get("show_in_sidebar", False)),
+        "mode": "storage",
+    }
+    if args.get("icon"):
+        item["icon"] = args["icon"]
+    items.append(item)
+    return registry, item
+
+
+def list_lovelace_dashboards(include_config: bool, max_bytes: int) -> dict[str, Any]:
+    registry = load_lovelace_registry()
+    rows = []
+    for item in registry["data"]["items"]:
+        key = dashboard_item_key(item)
+        path = storage_path(key)
+        row: dict[str, Any] = {"item": item, "key": key, "storage": {"path": str(path), "exists": path.exists()}}
+        if path.exists():
+            row["storage"] = path_info(path)
+            if include_config:
+                content, truncated = read_limited(path, max_bytes)
+                row["storage"]["content"] = content
+                row["storage"]["truncated"] = truncated
+        rows.append(row)
+    return {"count": len(rows), "dashboards": rows}
+
+
+def get_lovelace_dashboard(args: dict[str, Any], max_bytes: int) -> dict[str, Any]:
+    registry, item = resolve_lovelace_dashboard(args)
+    if item is None:
+        raise ValueError("Dashboard not found")
+    key = dashboard_item_key(item)
+    path = storage_path(key)
+    result: dict[str, Any] = {"item": item, "key": key, "path": str(path), "exists": path.exists()}
+    if path.exists():
+        content, truncated = read_limited(path, max_bytes)
+        result["content"] = content
+        result["truncated"] = truncated
+        try:
+            result["data"] = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+    return result
+
+
 def lovelace_storage_path(key: str) -> Path:
     if not (key == "lovelace_dashboards" or key == "lovelace_resources" or key.startswith("lovelace.")):
         raise ValueError("Lovelace dashboard keys must be lovelace.*, lovelace_dashboards, or lovelace_resources")
     return storage_path(key)
 
 
-def save_lovelace_dashboard(key: str, args: dict[str, Any]) -> dict[str, Any]:
-    path = lovelace_storage_path(key)
-    backup = None
-    if bool(args.get("backup", True)) and path.exists():
-        backup = backup_path(path, args.get("label") or key)
-    if "content" in args and args["content"] is not None:
-        path.write_text(str(args["content"]))
+def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
+    if args.get("key") and not any(args.get(name) is not None for name in ("id", "url_path", "title", "config", "views")):
+        path = lovelace_storage_path(args["key"])
+        backup = backup_path(path, args.get("label") or args["key"]) if bool(args.get("backup", True)) and path.exists() else None
+        if "content" in args and args["content"] is not None:
+            path.write_text(str(args["content"]))
+        else:
+            path.write_text(json.dumps(args.get("data"), indent=2, default=str))
+        if args.get("mode"):
+            path.chmod(int(str(args["mode"]), 8))
+        return path_info(path) | {"key": args["key"], "backup": backup, "mode": "raw_storage_key"}
+
+    registry, item = resolve_lovelace_dashboard(args, allow_missing=bool(args.get("create", True)))
+    if item is None:
+        raise ValueError("Dashboard not found; pass create=true with id or url_path to create it")
+    for field in ("title", "icon", "url_path"):
+        if args.get(field) is not None:
+            item[field] = args[field]
+    for field in ("show_in_sidebar", "require_admin"):
+        if args.get(field) is not None:
+            item[field] = bool(args[field])
+    item["mode"] = "storage"
+
+    key = dashboard_item_key(item)
+    path = storage_path(key)
+    backups: dict[str, Any] = {}
+    if bool(args.get("backup", True)):
+        if path.exists():
+            backups["dashboard"] = backup_path(path, args.get("label") or key)
+        registry_path = storage_path("lovelace_dashboards")
+        if registry_path.exists():
+            backups["registry"] = backup_path(registry_path, args.get("label") or "lovelace_dashboards")
+
+    if args.get("content") is not None:
+        dashboard_storage = json.loads(str(args["content"]))
+    elif args.get("data") is not None and "version" in args["data"] and "data" in args["data"]:
+        dashboard_storage = args["data"]
     else:
-        path.write_text(json.dumps(args.get("data"), indent=2, default=str))
-    if args.get("mode"):
-        path.chmod(int(str(args["mode"]), 8))
-    return path_info(path) | {"key": key, "backup": backup}
+        config = args.get("config")
+        if config is None:
+            config = {"title": item.get("title"), "views": args.get("views") or []}
+        elif args.get("views") is not None:
+            config = dict(config)
+            config["views"] = args["views"]
+        dashboard_storage = {"version": 1, "minor_version": 1, "key": key, "data": {"config": config}}
+    dashboard_storage["key"] = key
+    dashboard_info = dump_storage_json(key, dashboard_storage, args.get("mode"))
+    registry_info = dump_storage_json("lovelace_dashboards", registry)
+    return {"item": item, "key": key, "dashboard": dashboard_info, "registry": registry_info, "backups": backups}
+
+
+def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
+    registry, item = resolve_lovelace_dashboard(args)
+    if item is None:
+        raise ValueError("Dashboard not found")
+    key = dashboard_item_key(item)
+    path = storage_path(key)
+    backups: dict[str, Any] = {}
+    if bool(args.get("backup", True)):
+        if path.exists():
+            backups["dashboard"] = backup_path(path, key)
+        registry_path = storage_path("lovelace_dashboards")
+        if registry_path.exists():
+            backups["registry"] = backup_path(registry_path, "lovelace_dashboards")
+    registry["data"]["items"] = [candidate for candidate in registry["data"]["items"] if candidate.get("id") != item.get("id")]
+    registry_info = dump_storage_json("lovelace_dashboards", registry)
+    deleted = False
+    if path.exists():
+        path.unlink()
+        deleted = True
+    return {"item": item, "key": key, "deleted_storage": deleted, "registry": registry_info, "backups": backups}
 
 
 class Handler(BaseHTTPRequestHandler):
