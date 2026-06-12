@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.10"
+APP_VERSION = "0.1.12"
+CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
@@ -329,6 +330,12 @@ TOOLS = [
     tool_schema("start_core", "Start Home Assistant Core through Supervisor", {}, []),
     tool_schema("reload_core_config", "Reload Home Assistant core config through REST API", {}, []),
     tool_schema(
+        "check_reload_readiness",
+        "Run a config check and report common reload/restart options available through services",
+        {},
+        [],
+    ),
+    tool_schema(
         "reload_domain_config",
         "Reload a Home Assistant integration domain through /api/services/<domain>/reload when available",
         {"domain": {"type": "string"}, "data": {"type": "object"}},
@@ -388,7 +395,72 @@ TOOLS = [
         {"path": {"type": "string"}, "label": {"type": "string"}},
         ["path"],
     ),
+    tool_schema(
+        "list_config_files",
+        "List files under /config with optional recursion and pattern filtering",
+        {
+            "path": {"type": "string"},
+            "pattern": {"type": "string"},
+            "recursive": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
+    ),
+    tool_schema(
+        "read_config_file",
+        "Read a file under /config by relative path",
+        {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
+        ["path"],
+    ),
+    tool_schema(
+        "write_config_file",
+        "Write a text file under /config, optionally backing up to /backup/ha-admin-mcp and running config check",
+        {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "mode": {"type": "string"},
+            "backup": {"type": "boolean"},
+            "check_config": {"type": "boolean"},
+        },
+        ["path", "content"],
+    ),
+    tool_schema(
+        "search_config",
+        "Search filenames and text contents under /config with compact results",
+        {
+            "path": {"type": "string"},
+            "query": {"type": "string"},
+            "filename": {"type": "string"},
+            "recursive": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
+        },
+        [],
+    ),
+    tool_schema(
+        "tail_log",
+        "Return the last lines of a log file, defaulting to /config/home-assistant.log",
+        {
+            "path": {"type": "string"},
+            "lines": {"type": "integer", "minimum": 1, "maximum": 5000},
+            "max_bytes": {"type": "integer", "minimum": 1000, "maximum": 100000000},
+        },
+        [],
+    ),
     tool_schema("list_storage_keys", "List Home Assistant .storage keys", {"include_backups": {"type": "boolean"}}, []),
+    tool_schema(
+        "list_storage_keys_filtered",
+        "List Home Assistant .storage keys with pattern, text query, size, and limit filters",
+        {
+            "pattern": {"type": "string"},
+            "query": {"type": "string"},
+            "min_size": {"type": "integer", "minimum": 0},
+            "max_size": {"type": "integer", "minimum": 0},
+            "include_backups": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
+    ),
     tool_schema(
         "read_storage_key",
         "Read a Home Assistant .storage JSON key",
@@ -400,6 +472,67 @@ TOOLS = [
         "Search text inside a Home Assistant .storage key",
         {"key": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
         ["key", "query"],
+    ),
+    tool_schema(
+        "search_storage_json",
+        "Search parsed JSON inside a Home Assistant .storage key and return compact JSON paths",
+        {
+            "key": {"type": "string"},
+            "query": {"type": "string"},
+            "field": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
+        },
+        ["key", "query"],
+    ),
+    tool_schema(
+        "search_entity_registry",
+        "Filter core.entity_registry without returning the whole registry",
+        {
+            "entity_id": {"type": "string"},
+            "domain": {"type": "string"},
+            "platform": {"type": "string"},
+            "device_id": {"type": "string"},
+            "area_id": {"type": "string"},
+            "disabled_by": {"type": "string"},
+            "hidden_by": {"type": "string"},
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
+    ),
+    tool_schema(
+        "get_entity_registry_entry",
+        "Get one core.entity_registry entry by entity_id, unique_id, or id",
+        {"entity_id": {"type": "string"}, "unique_id": {"type": "string"}, "id": {"type": "string"}},
+        [],
+    ),
+    tool_schema(
+        "search_device_registry",
+        "Filter core.device_registry without returning the whole registry",
+        {
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "manufacturer": {"type": "string"},
+            "model": {"type": "string"},
+            "area_id": {"type": "string"},
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
+    ),
+    tool_schema(
+        "search_config_entries",
+        "Filter core.config_entries without returning the whole file",
+        {
+            "entry_id": {"type": "string"},
+            "domain": {"type": "string"},
+            "title": {"type": "string"},
+            "source": {"type": "string"},
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
     ),
     tool_schema(
         "read_lovelace_dashboards",
@@ -589,6 +722,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return supervisor_request("POST", "/core/start")
     if name == "reload_core_config":
         return ha_request("POST", "/services/homeassistant/reload_core_config")
+    if name == "check_reload_readiness":
+        return check_reload_readiness()
     if name == "reload_domain_config":
         return ha_request("POST", f"/services/{args['domain']}/reload", args.get("data") or {})
     if name == "call_service":
@@ -622,12 +757,37 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return ha_request("POST", f"/events/{args['event_type']}", args.get("event_data") or {})
     if name == "backup_path":
         return backup_path(Path(args["path"]), args.get("label"))
+    if name == "list_config_files":
+        return list_config_files(args)
+    if name == "read_config_file":
+        content, truncated = read_limited(config_path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
+        return {"path": str(config_path(args["path"])), "relative_path": args["path"], "content": content, "truncated": truncated}
+    if name == "write_config_file":
+        return write_config_file(args)
+    if name == "search_config":
+        search_args = dict(args)
+        search_args["path"] = str(config_path(search_args.get("path") or "."))
+        return search_files(search_args)
+    if name == "tail_log":
+        return tail_log(args)
     if name == "list_storage_keys":
         return list_storage_keys(bool(args.get("include_backups")))
+    if name == "list_storage_keys_filtered":
+        return list_storage_keys_filtered(args)
     if name == "read_storage_key":
         return read_storage_key(args["key"], int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "search_storage_key":
         return search_storage_key(args["key"], args["query"], int(args.get("limit") or 50))
+    if name == "search_storage_json":
+        return search_storage_json(args)
+    if name == "search_entity_registry":
+        return search_entity_registry(args)
+    if name == "get_entity_registry_entry":
+        return get_entity_registry_entry(args)
+    if name == "search_device_registry":
+        return search_device_registry(args)
+    if name == "search_config_entries":
+        return search_config_entries(args)
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "list_lovelace_dashboards":
@@ -726,6 +886,89 @@ def backup_path(path: Path, label: str | None) -> dict[str, Any]:
     return {"source": str(path), "backup": str(destination)}
 
 
+def config_path(path: str) -> Path:
+    if not path or path == ".":
+        return CONFIG_ROOT.resolve()
+    candidate = Path(path)
+    if candidate.is_absolute():
+        raise ValueError("Config file paths must be relative to /config")
+    root = CONFIG_ROOT.resolve()
+    target = (CONFIG_ROOT / candidate).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("Config path escapes /config")
+    return target
+
+
+def list_config_files(args: dict[str, Any]) -> dict[str, Any]:
+    root = config_path(args.get("path") or ".")
+    pattern = args.get("pattern") or "*"
+    recursive = bool(args.get("recursive", False))
+    limit = int(args.get("limit") or 500)
+    iterator = root.rglob(pattern) if recursive else root.glob(pattern)
+    rows = []
+    for path in iterator:
+        if len(rows) >= limit:
+            break
+        try:
+            rows.append(path_info(path) | {"relative_path": str(path.relative_to(CONFIG_ROOT))})
+        except OSError as err:
+            rows.append({"path": str(path), "error": str(err)})
+    return {"root": str(root), "count": len(rows), "files": rows}
+
+
+def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
+    path = config_path(args["path"])
+    backup = None
+    if path.exists() and bool(args.get("backup", True)):
+        backup = backup_path(path, args["path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(args["content"])
+    if args.get("mode"):
+        path.chmod(int(str(args["mode"]), 8))
+    result: dict[str, Any] = path_info(path) | {"relative_path": args["path"], "backup": backup}
+    if bool(args.get("check_config", False)):
+        result["check_config"] = supervisor_request("POST", "/core/check")
+    return result
+
+
+def tail_log(args: dict[str, Any]) -> dict[str, Any]:
+    explicit_path = bool(args.get("path"))
+    raw_path = args.get("path") or "/config/home-assistant.log"
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = config_path(raw_path)
+    if not path.exists() and not explicit_path:
+        candidates = [candidate for candidate in CONFIG_ROOT.glob("*.log*") if candidate.is_file()]
+        if not candidates:
+            return {"path": str(path), "exists": False, "lines": [], "line_count": 0, "candidates": []}
+        path = max(candidates, key=lambda candidate: candidate.stat().st_mtime)
+    lines = int(args.get("lines") or 200)
+    max_bytes = int(args.get("max_bytes") or 2_000_000)
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(size - max_bytes)
+            truncated = True
+        else:
+            truncated = False
+        data = handle.read(max_bytes)
+    text = data.decode("utf-8", errors="replace")
+    tail = text.splitlines()[-lines:]
+    return {"path": str(path), "lines": tail, "line_count": len(tail), "truncated_from_start": truncated}
+
+
+def check_reload_readiness() -> dict[str, Any]:
+    check = supervisor_request("POST", "/core/check")
+    services = ha_request("GET", "/services")
+    reloads = []
+    for domain in services:
+        domain_name = domain.get("domain")
+        for service in domain.get("services", {}):
+            if service.startswith("reload"):
+                reloads.append({"domain": domain_name, "service": service})
+    return {"check_config": check, "reload_services": reloads}
+
+
 def storage_path(key: str) -> Path:
     if "/" in key or "\\" in key:
         raise ValueError("Invalid storage key")
@@ -740,6 +983,34 @@ def list_storage_keys(include_backups: bool) -> list[dict[str, Any]]:
             continue
         rows.append(path_info(path) | {"key": path.name})
     return rows
+
+
+def list_storage_keys_filtered(args: dict[str, Any]) -> dict[str, Any]:
+    pattern = args.get("pattern") or "*"
+    query = str(args.get("query") or "").lower()
+    min_size = args.get("min_size")
+    max_size = args.get("max_size")
+    include_backups = bool(args.get("include_backups", False))
+    limit = int(args.get("limit") or 500)
+    rows = []
+    for path in sorted(Path("/config/.storage").iterdir()):
+        if len(rows) >= limit:
+            break
+        if not include_backups and (".bak" in path.name or "backup" in path.name):
+            continue
+        if not fnmatch.fnmatch(path.name, pattern):
+            continue
+        stat = path.stat()
+        if min_size is not None and stat.st_size < int(min_size):
+            continue
+        if max_size is not None and stat.st_size > int(max_size):
+            continue
+        if query:
+            content, _ = read_limited(path, min(stat.st_size, 5_000_000))
+            if query not in path.name.lower() and query not in content.lower():
+                continue
+        rows.append(path_info(path) | {"key": path.name})
+    return {"count": len(rows), "keys": rows}
 
 
 def read_storage_key(key: str, max_bytes: int) -> dict[str, Any]:
@@ -775,6 +1046,150 @@ def search_storage_key(key: str, query: str, limit: int) -> list[dict[str, Any]]
             if len(matches) >= limit:
                 break
     return matches
+
+
+def compact_value(value: Any, max_chars: int = 500) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    text = json.dumps(value, default=str)
+    if len(text) <= max_chars:
+        return value
+    return text[:max_chars] + "...<truncated>"
+
+
+def json_matches(value: Any, needle: str, field: str | None, path: str = "$") -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            key_match = needle in str(key).lower()
+            value_match = needle in str(child).lower()
+            field_match = field is None or key == field
+            if field_match and (key_match or value_match):
+                matches.append({"path": child_path, "key": key, "value": compact_value(child)})
+            matches.extend(json_matches(child, needle, field, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_path = f"{path}[{index}]"
+            if field is None and needle in str(child).lower():
+                matches.append({"path": child_path, "value": compact_value(child)})
+            matches.extend(json_matches(child, needle, field, child_path))
+    return matches
+
+
+def search_storage_json(args: dict[str, Any]) -> dict[str, Any]:
+    key = args["key"]
+    limit = int(args.get("limit") or 100)
+    max_bytes = int(args.get("max_bytes") or MAX_READ_BYTES)
+    content, truncated = read_limited(storage_path(key), max_bytes)
+    data = json.loads(content)
+    matches = json_matches(data, str(args["query"]).lower(), args.get("field"))
+    return {"key": key, "truncated": truncated, "count": min(len(matches), limit), "matches": matches[:limit]}
+
+
+def contains_text(value: Any, query: str) -> bool:
+    return query.lower() in json.dumps(value, default=str).lower()
+
+
+def field_equals(row: dict[str, Any], field: str, value: Any) -> bool:
+    if value is None:
+        return True
+    return str(row.get(field) or "") == str(value)
+
+
+def registry_search(key: str, list_name: str, args: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    data = load_storage_json(key)
+    rows = data.get("data", {}).get(list_name, [])
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for row in rows:
+        if len(matches) >= limit:
+            break
+        if any(not field_equals(row, field, args.get(field)) for field in fields):
+            continue
+        if query and not contains_text(row, query):
+            continue
+        matches.append(row)
+    return {"key": key, "count": len(matches), "matches": matches}
+
+
+def text_field_contains(row: dict[str, Any], fields: list[str], value: str | None) -> bool:
+    if value is None:
+        return True
+    needle = value.lower()
+    return any(needle in str(row.get(field) or "").lower() for field in fields)
+
+
+def search_entity_registry(args: dict[str, Any]) -> dict[str, Any]:
+    data = load_storage_json("core.entity_registry")
+    rows = data.get("data", {}).get("entities", [])
+    query = str(args.get("query") or "").lower()
+    domain = args.get("domain")
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for row in rows:
+        if len(matches) >= limit:
+            break
+        if domain and str(row.get("entity_id", "")).split(".", 1)[0] != domain:
+            continue
+        if any(not field_equals(row, field, args.get(field)) for field in ["entity_id", "platform", "device_id", "area_id", "disabled_by", "hidden_by"]):
+            continue
+        if query and not contains_text(row, query):
+            continue
+        matches.append(row)
+    return {"key": "core.entity_registry", "count": len(matches), "matches": matches}
+
+
+def get_entity_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
+    data = load_storage_json("core.entity_registry")
+    rows = data.get("data", {}).get("entities", [])
+    for row in rows:
+        if args.get("entity_id") and row.get("entity_id") == args["entity_id"]:
+            return row
+        if args.get("unique_id") and row.get("unique_id") == args["unique_id"]:
+            return row
+        if args.get("id") and row.get("id") == args["id"]:
+            return row
+    raise ValueError("Entity registry entry not found")
+
+
+def search_device_registry(args: dict[str, Any]) -> dict[str, Any]:
+    data = load_storage_json("core.device_registry")
+    rows = data.get("data", {}).get("devices", [])
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for row in rows:
+        if len(matches) >= limit:
+            break
+        if any(not field_equals(row, field, args.get(field)) for field in ["id", "manufacturer", "model", "area_id"]):
+            continue
+        if not text_field_contains(row, ["name_by_user", "name", "model", "manufacturer"], args.get("name")):
+            continue
+        if query and not contains_text(row, query):
+            continue
+        matches.append(row)
+    return {"key": "core.device_registry", "count": len(matches), "matches": matches}
+
+
+def search_config_entries(args: dict[str, Any]) -> dict[str, Any]:
+    data = load_storage_json("core.config_entries")
+    rows = data.get("data", {}).get("entries", [])
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for row in rows:
+        if len(matches) >= limit:
+            break
+        if any(not field_equals(row, field, args.get(field)) for field in ["entry_id", "domain", "source"]):
+            continue
+        if not text_field_contains(row, ["title"], args.get("title")):
+            continue
+        if query and not contains_text(row, query):
+            continue
+        matches.append(row)
+    return {"key": "core.config_entries", "count": len(matches), "matches": matches}
 
 
 def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str, Any]:
