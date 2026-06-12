@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.12"
+APP_VERSION = "0.1.13"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -558,6 +558,45 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "find_lovelace_cards",
+        "Find Lovelace cards in one dashboard and return stable JSON paths without saving changes",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "query": {"type": "string"},
+            "entity": {"type": "string"},
+            "card_type": {"type": "string"},
+            "path": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
+    ),
+    tool_schema(
+        "patch_lovelace_card",
+        "Patch exactly one Lovelace card by path or filters while preserving the rest of the dashboard",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "query": {"type": "string"},
+            "entity": {"type": "string"},
+            "card_type": {"type": "string"},
+            "path": {"type": "string"},
+            "patch": {"type": "object"},
+            "replace": {"type": "object"},
+            "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+        },
+        [],
+    ),
+    tool_schema(
         "save_lovelace_dashboard",
         "Create or update a Lovelace dashboard by id or url_path and save its config/views",
         {
@@ -794,6 +833,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "get_lovelace_dashboard":
         return get_lovelace_dashboard(args, int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "find_lovelace_cards":
+        return find_lovelace_cards(args)
+    if name == "patch_lovelace_card":
+        return patch_lovelace_card(args)
     if name == "save_lovelace_dashboard":
         return save_lovelace_dashboard(args)
     if name == "delete_lovelace_dashboard":
@@ -1321,6 +1364,175 @@ def get_lovelace_dashboard(args: dict[str, Any], max_bytes: int) -> dict[str, An
         except json.JSONDecodeError:
             pass
     return result
+
+
+def dashboard_storage(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str, dict[str, Any]]:
+    registry, item = resolve_lovelace_dashboard(args)
+    if item is None:
+        raise ValueError("Dashboard not found")
+    key = dashboard_item_key(item)
+    storage = load_storage_json(key)
+    config = storage.get("data", {}).get("config")
+    if not isinstance(config, dict):
+        raise ValueError("Dashboard storage does not contain data.config")
+    return item, storage, key, config
+
+
+def path_parts(path: str) -> list[str | int]:
+    if not path.startswith("$"):
+        raise ValueError("Card path must start with $")
+    parts: list[str | int] = []
+    index = 1
+    while index < len(path):
+        if path[index] == ".":
+            index += 1
+            start = index
+            while index < len(path) and path[index] not in ".[":
+                index += 1
+            if start == index:
+                raise ValueError(f"Invalid path: {path}")
+            parts.append(path[start:index])
+        elif path[index] == "[":
+            end = path.find("]", index)
+            if end == -1:
+                raise ValueError(f"Invalid path: {path}")
+            parts.append(int(path[index + 1 : end]))
+            index = end + 1
+        else:
+            raise ValueError(f"Invalid path: {path}")
+    return parts
+
+
+def value_at_path(root: Any, path: str) -> Any:
+    value = root
+    for part in path_parts(path):
+        value = value[part]
+    return value
+
+
+def set_value_at_path(root: Any, path: str, value: Any) -> None:
+    parts = path_parts(path)
+    if not parts:
+        raise ValueError("Cannot replace dashboard root")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[part]
+    parent[parts[-1]] = value
+
+
+def card_entities(card: Any) -> set[str]:
+    entities: set[str] = set()
+    if isinstance(card, dict):
+        for key, value in card.items():
+            if key == "entity" and isinstance(value, str):
+                entities.add(value)
+            elif key == "entities" and isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        entities.add(item)
+                    elif isinstance(item, dict) and isinstance(item.get("entity"), str):
+                        entities.add(item["entity"])
+            elif isinstance(value, (dict, list)):
+                entities.update(card_entities(value))
+    elif isinstance(card, list):
+        for item in card:
+            entities.update(card_entities(item))
+    return entities
+
+
+def iter_lovelace_cards(value: Any, path: str = "$") -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if "type" in value:
+            rows.append(
+                {
+                    "path": path,
+                    "type": value.get("type"),
+                    "title": value.get("title") or value.get("name"),
+                    "entities": sorted(card_entities(value)),
+                    "card": value,
+                }
+            )
+        for key, child in value.items():
+            if isinstance(child, (dict, list)):
+                rows.extend(iter_lovelace_cards(child, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if isinstance(child, (dict, list)):
+                rows.extend(iter_lovelace_cards(child, f"{path}[{index}]"))
+    return rows
+
+
+def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
+    if args.get("path") and row["path"] != args["path"]:
+        return False
+    if args.get("card_type") and row.get("type") != args["card_type"]:
+        return False
+    if args.get("entity") and args["entity"] not in row.get("entities", []):
+        return False
+    query = str(args.get("query") or "").lower()
+    if query and not contains_text(row.get("card"), query):
+        return False
+    return True
+
+
+def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
+    item, _storage, key, config = dashboard_storage(args)
+    views = config.get("views")
+    if not isinstance(views, list):
+        raise ValueError("Dashboard config does not contain a views list")
+    wanted_view_index = args.get("view_index")
+    wanted_view_title = args.get("view_title")
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for view_index, view in enumerate(views):
+        if wanted_view_index is not None and view_index != int(wanted_view_index):
+            continue
+        if wanted_view_title and str(view.get("title") or "") != wanted_view_title:
+            continue
+        for row in iter_lovelace_cards(view, f"$.data.config.views[{view_index}]"):
+            if card_matches(row, args):
+                matches.append(row)
+                if len(matches) >= limit:
+                    return {"item": item, "key": key, "count": len(matches), "matches": matches}
+    return {"item": item, "key": key, "count": len(matches), "matches": matches}
+
+
+def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    if args.get("patch") is None and args.get("replace") is None and not args.get("remove_keys"):
+        raise ValueError("Pass patch, replace, or remove_keys")
+    item, storage, key, config = dashboard_storage(args)
+    search = find_lovelace_cards(args)
+    matches = search["matches"]
+    expected = int(args.get("expected_matches") or 1)
+    if len(matches) != expected:
+        return {"changed": False, "error": f"Expected {expected} match(es), found {len(matches)}", "matches": matches}
+    if expected != 1:
+        raise ValueError("patch_lovelace_card currently requires expected_matches=1")
+    target_path = matches[0]["path"]
+    card = value_at_path(storage, target_path)
+    if not isinstance(card, dict):
+        raise ValueError("Matched path is not a card object")
+    before = json.loads(json.dumps(card, default=str))
+    if args.get("replace") is not None:
+        replacement = args["replace"]
+        if not isinstance(replacement, dict):
+            raise ValueError("replace must be an object")
+        set_value_at_path(storage, target_path, replacement)
+        after = replacement
+    else:
+        patch = args.get("patch") or {}
+        if not isinstance(patch, dict):
+            raise ValueError("patch must be an object")
+        for key_name in args.get("remove_keys") or []:
+            card.pop(str(key_name), None)
+        card.update(patch)
+        after = json.loads(json.dumps(card, default=str))
+    backups: dict[str, Any] = {}
+    if bool(args.get("backup", True)):
+        backups["dashboard"] = backup_path(storage_path(key), args.get("label") or key)
+    info = dump_storage_json(key, storage)
+    return {"changed": True, "item": item, "key": key, "path": target_path, "before": before, "after": after, "dashboard": info, "backups": backups}
 
 
 def lovelace_storage_path(key: str) -> Path:
