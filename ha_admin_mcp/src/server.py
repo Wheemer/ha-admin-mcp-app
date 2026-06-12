@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.13"
+APP_VERSION = "0.1.14"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -558,6 +558,39 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "get_lovelace_view",
+        "Read exactly one Lovelace dashboard view by index, title, path, or query",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "view_path": {"type": "string"},
+            "query": {"type": "string"},
+            "include_cards": {"type": "boolean"},
+            "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        [],
+    ),
+    tool_schema(
+        "get_lovelace_card",
+        "Read exactly one Lovelace card by stable JSON path or narrow filters",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "query": {"type": "string"},
+            "entity": {"type": "string"},
+            "card_type": {"type": "string"},
+            "path": {"type": "string"},
+            "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        [],
+    ),
+    tool_schema(
         "find_lovelace_cards",
         "Find Lovelace cards in one dashboard and return stable JSON paths without saving changes",
         {
@@ -833,6 +866,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "get_lovelace_dashboard":
         return get_lovelace_dashboard(args, int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "get_lovelace_view":
+        return get_lovelace_view(args)
+    if name == "get_lovelace_card":
+        return get_lovelace_card(args)
     if name == "find_lovelace_cards":
         return find_lovelace_cards(args)
     if name == "patch_lovelace_card":
@@ -1378,6 +1415,61 @@ def dashboard_storage(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
     return item, storage, key, config
 
 
+def dashboard_views(config: dict[str, Any]) -> list[Any]:
+    views = config.get("views")
+    if not isinstance(views, list):
+        raise ValueError("Dashboard config does not contain a views list")
+    return views
+
+
+def view_summary(view: Any, index: int, include_cards: bool) -> dict[str, Any]:
+    if not isinstance(view, dict):
+        return {"index": index, "view": view}
+    summary = dict(view) if include_cards else {key: value for key, value in view.items() if key != "cards"}
+    cards = view.get("cards")
+    if isinstance(cards, list):
+        summary["card_count"] = len(cards)
+        if not include_cards:
+            summary["cards"] = [
+                {
+                    "path": f"$.data.config.views[{index}].cards[{card_index}]",
+                    "type": card.get("type") if isinstance(card, dict) else None,
+                    "title": (card.get("title") or card.get("name")) if isinstance(card, dict) else None,
+                    "entities": sorted(card_entities(card)),
+                }
+                for card_index, card in enumerate(cards)
+            ]
+    return {"index": index, "view": summary}
+
+
+def matching_views(config: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+    views = dashboard_views(config)
+    matches = []
+    query = str(args.get("query") or "").lower()
+    for index, view in enumerate(views):
+        if args.get("view_index") is not None and index != int(args["view_index"]):
+            continue
+        if args.get("view_title") and (not isinstance(view, dict) or str(view.get("title") or "") != args["view_title"]):
+            continue
+        if args.get("view_path") and (not isinstance(view, dict) or str(view.get("path") or "") != args["view_path"]):
+            continue
+        if query and not contains_text(view, query):
+            continue
+        matches.append(view_summary(view, index, bool(args.get("include_cards", True))))
+    return matches
+
+
+def get_lovelace_view(args: dict[str, Any]) -> dict[str, Any]:
+    item, _storage, key, config = dashboard_storage(args)
+    matches = matching_views(config, args)
+    expected = int(args.get("expected_matches") or 1)
+    if len(matches) != expected:
+        return {"item": item, "key": key, "count": len(matches), "error": f"Expected {expected} view match(es), found {len(matches)}", "matches": matches}
+    if expected != 1:
+        raise ValueError("get_lovelace_view currently requires expected_matches=1")
+    return {"item": item, "key": key, "count": 1, "match": matches[0]}
+
+
 def path_parts(path: str) -> list[str | int]:
     if not path.startswith("$"):
         raise ValueError("Card path must start with $")
@@ -1478,9 +1570,7 @@ def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
 
 def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
     item, _storage, key, config = dashboard_storage(args)
-    views = config.get("views")
-    if not isinstance(views, list):
-        raise ValueError("Dashboard config does not contain a views list")
+    views = dashboard_views(config)
     wanted_view_index = args.get("view_index")
     wanted_view_title = args.get("view_title")
     limit = int(args.get("limit") or 100)
@@ -1496,6 +1586,19 @@ def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
                 if len(matches) >= limit:
                     return {"item": item, "key": key, "count": len(matches), "matches": matches}
     return {"item": item, "key": key, "count": len(matches), "matches": matches}
+
+
+def get_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    item, storage, key, _config = dashboard_storage(args)
+    search = find_lovelace_cards(args)
+    matches = search["matches"]
+    expected = int(args.get("expected_matches") or 1)
+    if len(matches) != expected:
+        return {"item": item, "key": key, "count": len(matches), "error": f"Expected {expected} card match(es), found {len(matches)}", "matches": matches}
+    if expected != 1:
+        raise ValueError("get_lovelace_card currently requires expected_matches=1")
+    target_path = matches[0]["path"]
+    return {"item": item, "key": key, "path": target_path, "card": value_at_path(storage, target_path)}
 
 
 def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
