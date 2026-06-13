@@ -35,6 +35,10 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 - Lovelace dashboards: `read_lovelace_dashboards`, `list_lovelace_dashboards`, `get_lovelace_dashboard`, `get_lovelace_view`, `get_lovelace_card`, `find_lovelace_cards`, `patch_lovelace_card`, `save_lovelace_dashboard`, `delete_lovelace_dashboard`
 - Backups: `backup_path`
 
+## MCP Protocol Surface
+
+The app supports normal MCP discovery and reads for tools, resources, resource templates, prompts, completion, logging level changes, pings, batches, and notifications. Useful resources include HA core/supervisor/host info, states, services, events, config files, storage keys, registries, and Lovelace dashboards/views.
+
 ## Backup Policy
 
 Backups created by this app are written under `/backup/ha-admin-mcp` by default, not inside live `/config` folders.

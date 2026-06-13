@@ -18,13 +18,14 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.15"
+APP_VERSION = "0.1.16"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
-SUPPORTED_PROTOCOL_VERSIONS = {"2025-03-26", "2024-11-05"}
+SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
 MCP_PATH = "/api/mcp"
+LOG_LEVEL = "info"
 TEXT_EXTENSIONS = {
     ".conf",
     ".css",
@@ -675,6 +676,74 @@ TOOLS = [
         {"key": {"type": "string"}, "label": {"type": "string"}},
         ["key"],
     ),
+]
+
+
+RESOURCES = [
+    {"uri": "ha://core/info", "name": "Home Assistant Core info", "mimeType": "application/json"},
+    {"uri": "ha://supervisor/info", "name": "Supervisor info", "mimeType": "application/json"},
+    {"uri": "ha://host/info", "name": "Host info", "mimeType": "application/json"},
+    {"uri": "ha://states", "name": "Home Assistant states", "mimeType": "application/json"},
+    {"uri": "ha://services", "name": "Home Assistant services", "mimeType": "application/json"},
+    {"uri": "ha://events", "name": "Home Assistant events", "mimeType": "application/json"},
+    {"uri": "ha://lovelace/dashboards", "name": "Lovelace dashboards", "mimeType": "application/json"},
+    {"uri": "ha://config/configuration.yaml", "name": "configuration.yaml", "mimeType": "text/yaml"},
+    {"uri": "ha://storage/core.entity_registry", "name": "Entity registry", "mimeType": "application/json"},
+    {"uri": "ha://storage/core.device_registry", "name": "Device registry", "mimeType": "application/json"},
+    {"uri": "ha://storage/core.config_entries", "name": "Config entries", "mimeType": "application/json"},
+]
+
+
+RESOURCE_TEMPLATES = [
+    {
+        "uriTemplate": "ha://state/{entity_id}",
+        "name": "One Home Assistant entity state",
+        "mimeType": "application/json",
+    },
+    {
+        "uriTemplate": "ha://config/{path}",
+        "name": "One file under /config",
+        "mimeType": "text/plain",
+    },
+    {
+        "uriTemplate": "ha://storage/{key}",
+        "name": "One Home Assistant .storage key",
+        "mimeType": "application/json",
+    },
+    {
+        "uriTemplate": "ha://lovelace/dashboard/{id}",
+        "name": "One Lovelace dashboard",
+        "mimeType": "application/json",
+    },
+    {
+        "uriTemplate": "ha://lovelace/view/{id}/{view}",
+        "name": "One Lovelace dashboard view by title, path, or index",
+        "mimeType": "application/json",
+    },
+]
+
+
+PROMPTS = [
+    {
+        "name": "ha_admin_audit",
+        "description": "Inspect HA health, logs, registries, config check, and reload readiness before making changes.",
+        "arguments": [],
+    },
+    {
+        "name": "lovelace_safe_patch",
+        "description": "Workflow for finding and patching one Lovelace card without replacing the full dashboard blob.",
+        "arguments": [
+            {"name": "dashboard", "description": "Dashboard id, url path, or storage key", "required": False},
+            {"name": "target", "description": "Entity, card title, card type, or query to locate", "required": False},
+        ],
+    },
+    {
+        "name": "config_safe_edit",
+        "description": "Workflow for reading, editing, checking, and reloading Home Assistant config safely.",
+        "arguments": [
+            {"name": "path", "description": "Config file path relative to /config", "required": False},
+        ],
+    },
 ]
 
 
@@ -1717,6 +1786,97 @@ def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     return {"item": item, "key": key, "deleted_storage": deleted, "registry": registry_info, "backups": backups}
 
 
+def resource_text(uri: str, value: Any, mime_type: str = "application/json") -> dict[str, Any]:
+    text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
+    return {"uri": uri, "mimeType": mime_type, "text": text}
+
+
+def read_resource(uri: str) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme != "ha":
+        raise ValueError("Unsupported resource URI scheme")
+    path = parsed.netloc + parsed.path
+    path = path.strip("/")
+    if path == "core/info":
+        return {"contents": [resource_text(uri, supervisor_request("GET", "/core/info"))]}
+    if path == "supervisor/info":
+        return {"contents": [resource_text(uri, supervisor_request("GET", "/supervisor/info"))]}
+    if path == "host/info":
+        return {"contents": [resource_text(uri, supervisor_request("GET", "/host/info"))]}
+    if path == "states":
+        return {"contents": [resource_text(uri, ha_request("GET", "/states"))]}
+    if path.startswith("state/"):
+        entity_id = urllib.parse.unquote(path.removeprefix("state/"))
+        return {"contents": [resource_text(uri, ha_request("GET", f"/states/{entity_id}"))]}
+    if path == "services":
+        return {"contents": [resource_text(uri, ha_request("GET", "/services"))]}
+    if path == "events":
+        return {"contents": [resource_text(uri, ha_request("GET", "/events"))]}
+    if path == "lovelace/dashboards":
+        return {"contents": [resource_text(uri, list_lovelace_dashboards(False, MAX_READ_BYTES))]}
+    if path.startswith("lovelace/dashboard/"):
+        dashboard_id = urllib.parse.unquote(path.removeprefix("lovelace/dashboard/"))
+        return {"contents": [resource_text(uri, get_lovelace_dashboard({"id": dashboard_id}, MAX_READ_BYTES))]}
+    if path.startswith("lovelace/view/"):
+        parts = path.split("/", 3)
+        if len(parts) != 4:
+            raise ValueError("Lovelace view resource must be ha://lovelace/view/{id}/{view}")
+        dashboard_id = urllib.parse.unquote(parts[2])
+        view = urllib.parse.unquote(parts[3])
+        args: dict[str, Any] = {"id": dashboard_id, "include_cards": True}
+        if view.isdigit():
+            args["view_index"] = int(view)
+        else:
+            args["view_title"] = view
+        return {"contents": [resource_text(uri, get_lovelace_view(args))]}
+    if path.startswith("config/"):
+        relpath = urllib.parse.unquote(path.removeprefix("config/"))
+        content, truncated = read_limited(config_path(relpath), MAX_READ_BYTES)
+        suffix = Path(relpath).suffix.lower()
+        mime = "text/yaml" if suffix in (".yaml", ".yml") else "text/plain"
+        if truncated:
+            content += "\n...<truncated>"
+        return {"contents": [resource_text(uri, content, mime)]}
+    if path.startswith("storage/"):
+        key = urllib.parse.unquote(path.removeprefix("storage/"))
+        return {"contents": [resource_text(uri, read_storage_key(key, MAX_READ_BYTES))]}
+    raise ValueError(f"Unknown resource URI: {uri}")
+
+
+def prompt_message(text: str) -> dict[str, Any]:
+    return {"role": "user", "content": {"type": "text", "text": text}}
+
+
+def get_prompt(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if name == "ha_admin_audit":
+        text = (
+            "Audit this Home Assistant instance before changing it. Use core_info, supervisor_info, "
+            "check_reload_readiness, tail_log, search_config_entries, search_entity_registry, and targeted reads. "
+            "Keep evidence separate from guesses and do not restart/reload unless the change requires it."
+        )
+    elif name == "lovelace_safe_patch":
+        dashboard = arguments.get("dashboard") or "the relevant dashboard"
+        target = arguments.get("target") or "the requested card"
+        text = (
+            f"Patch {target} on {dashboard} safely. Use list_lovelace_dashboards, get_lovelace_view or "
+            "find_lovelace_cards/get_lovelace_card to locate exactly one card, then patch_lovelace_card with "
+            "expected_matches=1. Do not full-save a dashboard unless the targeted patch tools cannot express the change."
+        )
+    elif name == "config_safe_edit":
+        path = arguments.get("path") or "the relevant config file"
+        text = (
+            f"Edit {path} safely. Read/search the current config first, write the smallest change, run check_config, "
+            "then reload the relevant domain or report that restart is required."
+        )
+    else:
+        raise ValueError(f"Unknown prompt: {name}")
+    return {"description": next((prompt["description"] for prompt in PROMPTS if prompt["name"] == name), name), "messages": [prompt_message(text)]}
+
+
+def completion_result() -> dict[str, Any]:
+    return {"completion": {"values": [], "total": 0, "hasMore": False}}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HAAdminMCP/0.1"
 
@@ -1737,7 +1897,11 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json({"error": "unauthorized"}, status=401)
             return
         length = int(self.headers.get("Content-Length", "0"))
-        message = json.loads(self.rfile.read(length) or b"{}")
+        try:
+            message = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError as err:
+            self.write_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {err}"}})
+            return
         response = self.handle_message(message)
         if response is None:
             self.send_response(202)
@@ -1751,7 +1915,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         if self.path == MCP_PATH:
-            self.send_error(405, "Session termination is not implemented")
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         self.send_error(404)
 
@@ -1778,22 +1944,40 @@ class Handler(BaseHTTPRequestHandler):
                 result = {
                     "protocolVersion": protocol_version,
                     "serverInfo": {"name": "ha-admin-mcp", "version": APP_VERSION},
-                    "capabilities": {"tools": {"listChanged": True}},
+                    "capabilities": {
+                        "tools": {"listChanged": True},
+                        "resources": {"subscribe": False, "listChanged": True},
+                        "prompts": {"listChanged": True},
+                        "logging": {},
+                    },
                 }
             elif method == "tools/list":
                 result = {"tools": TOOLS}
             elif method == "prompts/list":
-                result = {"prompts": []}
+                result = {"prompts": PROMPTS}
+            elif method == "prompts/get":
+                params = request.get("params") or {}
+                result = get_prompt(params["name"], params.get("arguments") or {})
             elif method == "resources/list":
-                result = {"resources": []}
+                result = {"resources": RESOURCES}
+            elif method == "resources/read":
+                params = request.get("params") or {}
+                result = read_resource(params["uri"])
             elif method == "resources/templates/list":
-                result = {"resourceTemplates": []}
+                result = {"resourceTemplates": RESOURCE_TEMPLATES}
             elif method == "tools/call":
                 params = request.get("params") or {}
                 result = text_result(call_tool(params["name"], params.get("arguments") or {}))
             elif method == "ping":
                 result = {}
-            elif method == "notifications/initialized":
+            elif method == "completion/complete":
+                result = completion_result()
+            elif method == "logging/setLevel":
+                global LOG_LEVEL
+                params = request.get("params") or {}
+                LOG_LEVEL = str(params.get("level") or "info")
+                result = {}
+            elif method and method.startswith("notifications/"):
                 return None
             else:
                 return self.rpc_error(request_id, -32601, f"Method not found: {method}")
