@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.18"
+APP_VERSION = "0.1.19"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -1209,6 +1209,8 @@ def get_environment(include_values: bool) -> dict[str, Any]:
 
 def get_version() -> str:
     info = supervisor_request("GET", "/core/info")
+    if isinstance(info, dict) and isinstance(info.get("data"), dict):
+        info = info["data"]
     return str(info.get("version") or info.get("homeassistant") or info)
 
 
@@ -1337,7 +1339,7 @@ def domain_summary(domain: str, example_limit: int) -> dict[str, Any]:
         for attr in (state.get("attributes") or {}):
             attr_counts[attr] = attr_counts.get(attr, 0) + 1
         if len(examples) < example_limit:
-            examples.append(project_entity_state(state))
+            examples.append(project_entity_state(state, None))
     return {"domain": domain, "count": len(states), "states": state_counts, "common_attributes": attr_counts, "examples": examples}
 
 
