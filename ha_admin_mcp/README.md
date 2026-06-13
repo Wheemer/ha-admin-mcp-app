@@ -45,3 +45,14 @@ The app supports normal MCP discovery and reads for tools, resources, resource t
 ## Backup Policy
 
 Backups created by this app are written under `/backup/ha-admin-mcp` by default, not inside live `/config` folders.
+
+## Guardrails
+
+This app is still intentionally dangerous. The guardrails are there to prevent accidental damage while preserving full administrative access when explicitly requested:
+
+- Destructive tools advertise MCP annotations where supported by the client.
+- High-blast operations such as deleting root/config directories, deleting storage keys, deleting dashboards, stopping Core, and restarting Core require `force: true`.
+- Write/delete/dashboard/storage tools support `dry_run` where practical, so clients can inspect the exact target before mutating it.
+- Write and patch tools can require an `expected_hash` to avoid overwriting something that changed after it was read.
+- `get_target_identity` reports the app, Core, Supervisor, and host identity so clients can confirm which Home Assistant instance is being controlled.
+- Mutating operations append JSON lines to `/backup/ha-admin-mcp/audit.log`.

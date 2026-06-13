@@ -21,14 +21,18 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.21"
+APP_VERSION = "0.1.22"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
+AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
 MCP_PATH = "/api/mcp"
 LOG_LEVEL = "info"
+DANGEROUS_PATHS = {"/", "/config", "/backup", "/data", "/share", "/ssl", "/addons", "/usr", "/bin", "/sbin", "/etc", "/root", "/var"}
+READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "check", "render", "overview", "summary")
+DESTRUCTIVE_HINTS = ("delete", "remove", "restart", "stop", "write", "patch", "set", "save", "run", "shell", "control", "call", "fire", "manage")
 TEXT_EXTENSIONS = {
     ".conf",
     ".css",
@@ -227,10 +231,58 @@ def http_request(args: dict[str, Any]) -> dict[str, Any]:
         }
 
 
+def tool_annotations(name: str) -> dict[str, Any]:
+    lowered = name.lower()
+    read_only = lowered.startswith(READ_ONLY_HINTS) or any(lowered.startswith(f"ha_{hint}") for hint in READ_ONLY_HINTS)
+    destructive = any(hint in lowered for hint in DESTRUCTIVE_HINTS)
+    if read_only and not destructive:
+        return {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True}
+    return {"readOnlyHint": False, "destructiveHint": destructive, "idempotentHint": False}
+
+
+def audit_event(action: str, details: dict[str, Any]) -> None:
+    try:
+        DEFAULT_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        row = {"time": datetime.now(timezone.utc).isoformat(), "action": action, "details": details}
+        with AUDIT_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, default=str) + "\n")
+    except Exception as err:
+        print(f"[ha-admin-mcp] audit log failed: {err}", flush=True)
+
+
+def path_hash(path: Path) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    return hash_file(path, "sha256")["hexdigest"]
+
+
+def require_expected_hash(path: Path, expected_hash: str | None) -> None:
+    if not expected_hash:
+        return
+    actual = path_hash(path)
+    if actual != expected_hash:
+        raise ValueError(f"expected_hash mismatch for {path}: expected {expected_hash}, actual {actual}")
+
+
+def is_dangerous_path(path: Path) -> bool:
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path.absolute())
+    normalized = resolved.replace("\\", "/").rstrip("/") or "/"
+    return normalized in DANGEROUS_PATHS
+
+
+def require_force_for_path(path: Path, args: dict[str, Any], operation: str) -> None:
+    if (is_dangerous_path(path) or (path.is_dir() and args.get("recursive"))) and not bool(args.get("force")):
+        raise ValueError(f"{operation} on {path} requires force=true")
+
+
 def tool_schema(name: str, description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
     return {
         "name": name,
         "description": description,
+        "annotations": tool_annotations(name),
         "inputSchema": {
             "type": "object",
             "properties": properties,
@@ -269,6 +321,7 @@ TOOLS = [
         {"include_values": {"type": "boolean"}},
         [],
     ),
+    tool_schema("get_target_identity", "Return the HA target identity this MCP app is controlling", {}, []),
     tool_schema("get_version", "Compatibility tool: return Home Assistant Core version", {}, []),
     tool_schema(
         "search_tools",
@@ -298,19 +351,19 @@ TOOLS = [
     tool_schema(
         "write_file_base64",
         "Write a visible file from base64 content, creating parent directories if needed",
-        {"path": {"type": "string"}, "content_base64": {"type": "string"}, "mode": {"type": "string"}},
+        {"path": {"type": "string"}, "content_base64": {"type": "string"}, "mode": {"type": "string"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}},
         ["path", "content_base64"],
     ),
     tool_schema(
         "write_file",
         "Write a file visible to the app, creating parent directories if needed",
-        {"path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}},
+        {"path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}},
         ["path", "content"],
     ),
     tool_schema(
         "delete_path",
         "Delete any visible file or directory",
-        {"path": {"type": "string"}, "recursive": {"type": "boolean"}},
+        {"path": {"type": "string"}, "recursive": {"type": "boolean"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
         ["path"],
     ),
     tool_schema(
@@ -390,8 +443,8 @@ TOOLS = [
         },
         ["slug", "action"],
     ),
-    tool_schema("restart_core", "Restart Home Assistant Core through Supervisor", {}, []),
-    tool_schema("stop_core", "Stop Home Assistant Core through Supervisor", {}, []),
+    tool_schema("restart_core", "Restart Home Assistant Core through Supervisor", {"force": {"type": "boolean"}}, []),
+    tool_schema("stop_core", "Stop Home Assistant Core through Supervisor", {"force": {"type": "boolean"}}, []),
     tool_schema("start_core", "Start Home Assistant Core through Supervisor", {}, []),
     tool_schema("reload_core_config", "Reload Home Assistant core config through REST API", {}, []),
     tool_schema(
@@ -562,6 +615,8 @@ TOOLS = [
             "mode": {"type": "string"},
             "backup": {"type": "boolean"},
             "check_config": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
         },
         ["path", "content"],
     ),
@@ -643,6 +698,8 @@ TOOLS = [
             "remove_keys": {"type": "array", "items": {"type": "string"}},
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
         },
         ["key", "path"],
     ),
@@ -817,6 +874,8 @@ TOOLS = [
             "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
         },
         [],
     ),
@@ -839,25 +898,27 @@ TOOLS = [
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
             "mode": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
         },
         [],
     ),
     tool_schema(
         "delete_lovelace_dashboard",
         "Delete a Lovelace dashboard registry entry and storage file by id, url_path, or key",
-        {"id": {"type": "string"}, "url_path": {"type": "string"}, "key": {"type": "string"}, "backup": {"type": "boolean"}},
+        {"id": {"type": "string"}, "url_path": {"type": "string"}, "key": {"type": "string"}, "backup": {"type": "boolean"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
         [],
     ),
     tool_schema(
         "write_storage_key",
         "Write a Home Assistant .storage key from JSON data or raw content",
-        {"key": {"type": "string"}, "data": {"type": "object"}, "content": {"type": "string"}, "mode": {"type": "string"}},
+        {"key": {"type": "string"}, "data": {"type": "object"}, "content": {"type": "string"}, "mode": {"type": "string"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}, "backup": {"type": "boolean"}},
         ["key"],
     ),
     tool_schema(
         "delete_storage_key",
         "Delete a Home Assistant .storage key",
-        {"key": {"type": "string"}},
+        {"key": {"type": "string"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
         ["key"],
     ),
     tool_schema(
@@ -982,6 +1043,9 @@ UPSTREAM_COMPAT_TOOL_SCHEMAS = [
             "hours": {"type": "integer", "minimum": 1, "maximum": 100000},
             "period": {"type": "string"},
             "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
         },
         [],
     )
@@ -1066,6 +1130,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
+        audit_event("run_command", {"command": args["command"], "cwd": args.get("cwd")})
         completed = subprocess.run(
             args["command"],
             cwd=args.get("cwd") or None,
@@ -1086,6 +1151,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "run_shell":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
+        audit_event("run_shell", {"command": args["command"], "shell": args.get("shell"), "cwd": args.get("cwd")})
         completed = subprocess.run(
             args["command"],
             cwd=args.get("cwd") or None,
@@ -1107,6 +1173,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         }
     if name == "get_environment":
         return get_environment(bool(args.get("include_values")))
+    if name == "get_target_identity":
+        return get_target_identity()
     if name == "get_version":
         return get_version()
     if name == "search_tools":
@@ -1126,20 +1194,32 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return {"path": args["path"], "content_base64": base64.b64encode(data).decode(), "truncated": truncated}
     if name == "write_file":
         path = Path(args["path"])
+        require_expected_hash(path, args.get("expected_hash"))
+        if bool(args.get("dry_run")):
+            return {"path": str(path), "dry_run": True, "would_write_bytes": len(args["content"].encode()), "current_hash": path_hash(path)}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"])
         if args.get("mode"):
             path.chmod(int(str(args["mode"]), 8))
+        audit_event("write_file", {"path": str(path), "bytes": len(args["content"].encode())})
         return path_info(path)
     if name == "write_file_base64":
         path = Path(args["path"])
+        require_expected_hash(path, args.get("expected_hash"))
+        data = base64.b64decode(args["content_base64"])
+        if bool(args.get("dry_run")):
+            return {"path": str(path), "dry_run": True, "would_write_bytes": len(data), "current_hash": path_hash(path)}
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(base64.b64decode(args["content_base64"]))
+        path.write_bytes(data)
         if args.get("mode"):
             path.chmod(int(str(args["mode"]), 8))
+        audit_event("write_file_base64", {"path": str(path), "bytes": len(data)})
         return path_info(path)
     if name == "delete_path":
         path = Path(args["path"])
+        require_force_for_path(path, args, "delete_path")
+        if bool(args.get("dry_run")):
+            return {"path": str(path), "dry_run": True, "exists": path.exists(), "recursive": bool(args.get("recursive"))}
         if path.is_dir() and not path.is_symlink():
             if not args.get("recursive"):
                 path.rmdir()
@@ -1147,6 +1227,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
                 shutil.rmtree(path)
         else:
             path.unlink()
+        audit_event("delete_path", {"path": str(path), "recursive": bool(args.get("recursive"))})
         return {"path": str(path), "deleted": True}
     if name == "search_files":
         return search_files(args)
@@ -1155,8 +1236,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "hash_file":
         return hash_file(Path(args["path"]), args.get("algorithm") or "sha256")
     if name == "ha_api":
+        if str(args.get("method", "GET")).upper() not in ("GET", "HEAD", "OPTIONS"):
+            audit_event("ha_api", {"method": args.get("method", "GET"), "endpoint": args["endpoint"]})
         return ha_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
     if name == "supervisor_api":
+        if str(args.get("method", "GET")).upper() not in ("GET", "HEAD", "OPTIONS"):
+            audit_event("supervisor_api", {"method": args.get("method", "GET"), "endpoint": args["endpoint"]})
         return supervisor_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
     if name == "http_request":
         return http_request(args)
@@ -1175,20 +1260,31 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "app_logs":
         return supervisor_request("GET", f"/addons/{args['slug']}/logs")
     if name == "app_control":
+        audit_event("app_control", {"slug": args["slug"], "action": args["action"]})
         return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
     if name == "restart_core":
+        if not bool(args.get("force")):
+            raise ValueError("restart_core requires force=true")
+        audit_event("restart_core", {})
         return supervisor_request("POST", "/core/restart")
     if name == "stop_core":
+        if not bool(args.get("force")):
+            raise ValueError("stop_core requires force=true")
+        audit_event("stop_core", {})
         return supervisor_request("POST", "/core/stop")
     if name == "start_core":
+        audit_event("start_core", {})
         return supervisor_request("POST", "/core/start")
     if name == "reload_core_config":
+        audit_event("reload_core_config", {})
         return ha_request("POST", "/services/homeassistant/reload_core_config")
     if name == "check_reload_readiness":
         return check_reload_readiness()
     if name == "reload_domain_config":
+        audit_event("reload_domain_config", {"domain": args["domain"]})
         return ha_request("POST", f"/services/{args['domain']}/reload", args.get("data") or {})
     if name == "call_service":
+        audit_event("call_service", {"domain": args["domain"], "service": args["service"], "data": args.get("data") or {}})
         return ha_request("POST", f"/services/{args['domain']}/{args['service']}", args.get("data") or {})
     if name == "get_states":
         entity_id = args.get("entity_id")
@@ -1240,6 +1336,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "render_template":
         return ha_request("POST", "/template", {"template": args["template"]})
     if name == "fire_event":
+        audit_event("fire_event", {"event_type": args["event_type"], "event_data": args.get("event_data") or {}})
         return ha_request("POST", f"/events/{args['event_type']}", args.get("event_data") or {})
     if name == "backup_path":
         return backup_path(Path(args["path"]), args.get("label"))
@@ -1308,7 +1405,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return write_storage_key(args["key"], args)
     if name == "delete_storage_key":
         path = storage_path(args["key"])
+        if not bool(args.get("force")):
+            raise ValueError("delete_storage_key requires force=true")
+        if bool(args.get("dry_run")):
+            return {"key": args["key"], "path": str(path), "dry_run": True, "exists": path.exists()}
         path.unlink()
+        audit_event("delete_storage_key", {"key": args["key"], "path": str(path)})
         return {"key": args["key"], "path": str(path), "deleted": True}
     if name == "backup_storage_key":
         return backup_path(storage_path(args["key"]), args.get("label") or args["key"])
@@ -1330,6 +1432,19 @@ def get_environment(include_values: bool) -> dict[str, Any]:
                 value = path.read_text(errors="replace").strip()
                 rows["s6"][path.name] = redact(path.name, value)
     return rows
+
+
+def get_target_identity() -> dict[str, Any]:
+    core = supervisor_request("GET", "/core/info")
+    supervisor = supervisor_request("GET", "/supervisor/info")
+    host = supervisor_request("GET", "/host/info")
+    return {
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH},
+        "core": core.get("data", core) if isinstance(core, dict) else core,
+        "supervisor": supervisor.get("data", supervisor) if isinstance(supervisor, dict) else supervisor,
+        "host": host.get("data", host) if isinstance(host, dict) else host,
+        "warning": "This MCP app has full-access administrative control over this Home Assistant instance.",
+    }
 
 
 def get_version() -> str:
@@ -1523,9 +1638,15 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "logs": get_error_log({"level": "ERROR", "lines": 50}),
         }
     if name == "ha_restart":
-        return supervisor_request("POST", "/core/restart")
+        if not bool(args.get("force")):
+            raise ValueError("ha_restart requires force=true")
+        result = supervisor_request("POST", "/core/restart")
+        audit_event("ha_restart", {"result": result})
+        return result
     if name == "ha_reload_core":
-        return ha_request("POST", "/services/homeassistant/reload_core_config")
+        result = ha_request("POST", "/services/homeassistant/reload_core_config")
+        audit_event("ha_reload_core", {"result": result})
+        return result
     if name == "ha_eval_template":
         template = args.get("template") or args.get("content")
         if not template:
@@ -1591,16 +1712,34 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             content, truncated = read_limited(config_path(path), int(args.get("max_bytes") or MAX_READ_BYTES))
             return {"path": path, "content": content, "truncated": truncated}
         if name == "ha_write_file":
-            return write_config_file({"path": path, "content": args.get("content") or "", "backup": bool(args.get("backup", True)), "check_config": bool(args.get("check_config", False))})
+            return write_config_file({
+                "path": path,
+                "content": args.get("content") or "",
+                "backup": bool(args.get("backup", True)),
+                "check_config": bool(args.get("check_config", False)),
+                "dry_run": bool(args.get("dry_run")),
+                "expected_hash": args.get("expected_hash"),
+            })
         target = config_path(path)
+        require_force_for_path(target, args, "ha_delete_file")
+        if bool(args.get("dry_run")):
+            return {"path": str(target), "deleted": False, "dry_run": True, "exists": target.exists()}
         if target.is_dir():
             shutil.rmtree(target)
         else:
             target.unlink()
+        audit_event("ha_delete_file", {"path": str(target)})
         return {"path": str(target), "deleted": True}
     if name == "ha_config_set_yaml":
         path = args.get("path") or "configuration.yaml"
-        return write_config_file({"path": path, "content": args.get("content") or json.dumps(args.get("config") or {}, indent=2), "backup": bool(args.get("backup", True)), "check_config": bool(args.get("check_config", True))})
+        return write_config_file({
+            "path": path,
+            "content": args.get("content") or json.dumps(args.get("config") or {}, indent=2),
+            "backup": bool(args.get("backup", True)),
+            "check_config": bool(args.get("check_config", True)),
+            "dry_run": bool(args.get("dry_run")),
+            "expected_hash": args.get("expected_hash"),
+        })
     if name in ("ha_config_get_dashboard", "ha_config_set_dashboard", "ha_config_delete_dashboard"):
         dash_args = {
             "id": args.get("dashboard_id") or args.get("id") or args.get("identifier"),
@@ -1612,6 +1751,9 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "title": args.get("title"),
             "create": bool(args.get("create", True)),
             "backup": bool(args.get("backup", True)),
+            "dry_run": bool(args.get("dry_run")),
+            "force": bool(args.get("force")),
+            "expected_hash": args.get("expected_hash"),
         }
         if name == "ha_config_get_dashboard":
             return get_lovelace_dashboard(dash_args, int(args.get("max_bytes") or MAX_READ_BYTES))
@@ -1625,8 +1767,15 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         resources.setdefault("data", {}).setdefault("items", [])
         item_id = args.get("id") or args.get("url") or args.get("resource_id")
         if name == "ha_config_delete_dashboard_resource":
+            if not bool(args.get("force")):
+                raise ValueError("ha_config_delete_dashboard_resource requires force=true")
+            if bool(args.get("dry_run")):
+                matches = [item for item in resources["data"]["items"] if item.get("id") == item_id or item.get("url") == item_id]
+                return {"resource": item_id, "matches": matches, "dry_run": True}
             resources["data"]["items"] = [item for item in resources["data"]["items"] if item.get("id") != item_id and item.get("url") != item_id]
         else:
+            if bool(args.get("dry_run")):
+                return {"resource": args.get("resource") or args.get("data") or {"id": item_id, "url": args.get("url"), "type": args.get("type")}, "dry_run": True}
             item = args.get("resource") or args.get("data") or {"id": item_id, "url": args.get("url"), "type": args.get("type")}
             resources["data"]["items"] = [old for old in resources["data"]["items"] if old.get("id") != item.get("id") and old.get("url") != item.get("url")]
             resources["data"]["items"].append(item)
@@ -1814,6 +1963,17 @@ def list_config_files(args: dict[str, Any]) -> dict[str, Any]:
 
 def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
     path = config_path(args["path"])
+    require_expected_hash(path, args.get("expected_hash"))
+    if bool(args.get("dry_run")):
+        return {
+            "path": str(path),
+            "relative_path": args["path"],
+            "dry_run": True,
+            "would_write_bytes": len(args["content"].encode()),
+            "current_hash": path_hash(path),
+            "would_backup": bool(path.exists() and args.get("backup", True)),
+            "would_check_config": bool(args.get("check_config", False)),
+        }
     backup = None
     if path.exists() and bool(args.get("backup", True)):
         backup = backup_path(path, args["path"])
@@ -1824,6 +1984,7 @@ def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = path_info(path) | {"relative_path": args["path"], "backup": backup}
     if bool(args.get("check_config", False)):
         result["check_config"] = supervisor_request("POST", "/core/check")
+    audit_event("write_config_file", {"path": str(path), "backup": backup, "check_config": bool(args.get("check_config", False))})
     return result
 
 
@@ -1921,6 +2082,11 @@ def read_storage_key(key: str, max_bytes: int) -> dict[str, Any]:
 
 def write_storage_key(key: str, args: dict[str, Any]) -> dict[str, Any]:
     path = storage_path(key)
+    require_expected_hash(path, args.get("expected_hash"))
+    if bool(args.get("dry_run")):
+        content = str(args["content"]) if "content" in args and args["content"] is not None else json.dumps(args.get("data"), indent=2, default=str)
+        return {"key": key, "path": str(path), "dry_run": True, "would_write_bytes": len(content.encode()), "current_hash": path_hash(path), "would_backup": bool(path.exists() and args.get("backup", True))}
+    backup = backup_path(path, args.get("label") or key) if path.exists() and bool(args.get("backup", True)) else None
     path.parent.mkdir(parents=True, exist_ok=True)
     if "content" in args and args["content"] is not None:
         path.write_text(str(args["content"]))
@@ -1928,7 +2094,8 @@ def write_storage_key(key: str, args: dict[str, Any]) -> dict[str, Any]:
         path.write_text(json.dumps(args.get("data"), indent=2, default=str))
     if args.get("mode"):
         path.chmod(int(str(args["mode"]), 8))
-    return path_info(path) | {"key": key}
+    audit_event("write_storage_key", {"key": key, "path": str(path), "backup": backup})
+    return path_info(path) | {"key": key, "backup": backup}
 
 
 def search_storage_key(key: str, query: str, limit: int) -> list[dict[str, Any]]:
@@ -1990,6 +2157,8 @@ def read_storage_json_path(key: str, path: str) -> dict[str, Any]:
 
 def patch_storage_json_path(args: dict[str, Any]) -> dict[str, Any]:
     key = args["key"]
+    storage_file = storage_path(key)
+    require_expected_hash(storage_file, args.get("expected_hash"))
     data = load_storage_json(key)
     path = args["path"]
     target = value_at_path(data, path)
@@ -2008,8 +2177,11 @@ def patch_storage_json_path(args: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("patch must be an object")
             target.update(patch)
         after = json.loads(json.dumps(target, default=str))
+    if bool(args.get("dry_run")):
+        return {"key": key, "path": path, "dry_run": True, "before": before, "after": after, "current_hash": path_hash(storage_file)}
     backup = backup_path(storage_path(key), args.get("label") or key) if bool(args.get("backup", True)) and storage_path(key).exists() else None
     info = dump_storage_json(key, data)
+    audit_event("patch_storage_json_path", {"key": key, "path": path, "backup": backup})
     return {"key": key, "path": path, "before": before, "after": after, "backup": backup, "storage": info}
 
 
@@ -2312,6 +2484,7 @@ def dump_storage_json(key: str, data: dict[str, Any], mode: str | None = None) -
     path.write_text(json.dumps(data, indent=2, default=str))
     if mode:
         path.chmod(int(str(mode), 8))
+    audit_event("dump_storage_json", {"key": key, "path": str(path)})
     return path_info(path) | {"key": key}
 
 
@@ -2620,6 +2793,8 @@ def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("patch") is None and args.get("replace") is None and not args.get("remove_keys"):
         raise ValueError("Pass patch, replace, or remove_keys")
     item, storage, key, config = dashboard_storage(args)
+    storage_file = storage_path(key)
+    require_expected_hash(storage_file, args.get("expected_hash"))
     search = find_lovelace_cards(args)
     matches = search["matches"]
     expected = int(args.get("expected_matches") or 1)
@@ -2646,10 +2821,13 @@ def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
             card.pop(str(key_name), None)
         card.update(patch)
         after = json.loads(json.dumps(card, default=str))
+    if bool(args.get("dry_run")):
+        return {"changed": False, "dry_run": True, "item": item, "key": key, "path": target_path, "before": before, "after": after, "current_hash": path_hash(storage_file)}
     backups: dict[str, Any] = {}
     if bool(args.get("backup", True)):
         backups["dashboard"] = backup_path(storage_path(key), args.get("label") or key)
     info = dump_storage_json(key, storage)
+    audit_event("patch_lovelace_card", {"key": key, "path": target_path, "backups": backups})
     return {"changed": True, "item": item, "key": key, "path": target_path, "before": before, "after": after, "dashboard": info, "backups": backups}
 
 
@@ -2662,6 +2840,9 @@ def lovelace_storage_path(key: str) -> Path:
 def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("key") and not any(args.get(name) is not None for name in ("id", "url_path", "title", "config", "views")):
         path = lovelace_storage_path(args["key"])
+        require_expected_hash(path, args.get("expected_hash"))
+        if bool(args.get("dry_run")):
+            return {"key": args["key"], "path": str(path), "dry_run": True, "current_hash": path_hash(path), "would_backup": bool(path.exists() and args.get("backup", True))}
         backup = backup_path(path, args.get("label") or args["key"]) if bool(args.get("backup", True)) and path.exists() else None
         if "content" in args and args["content"] is not None:
             path.write_text(str(args["content"]))
@@ -2669,6 +2850,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
             path.write_text(json.dumps(args.get("data"), indent=2, default=str))
         if args.get("mode"):
             path.chmod(int(str(args["mode"]), 8))
+        audit_event("save_lovelace_dashboard_raw", {"key": args["key"], "path": str(path), "backup": backup})
         return path_info(path) | {"key": args["key"], "backup": backup, "mode": "raw_storage_key"}
 
     registry, item = resolve_lovelace_dashboard(args, allow_missing=bool(args.get("create", True)))
@@ -2684,13 +2866,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
 
     key = dashboard_item_key(item)
     path = storage_path(key)
-    backups: dict[str, Any] = {}
-    if bool(args.get("backup", True)):
-        if path.exists():
-            backups["dashboard"] = backup_path(path, args.get("label") or key)
-        registry_path = storage_path("lovelace_dashboards")
-        if registry_path.exists():
-            backups["registry"] = backup_path(registry_path, args.get("label") or "lovelace_dashboards")
+    require_expected_hash(path, args.get("expected_hash"))
 
     if args.get("content") is not None:
         dashboard_storage = json.loads(str(args["content"]))
@@ -2705,8 +2881,18 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
             config["views"] = args["views"]
         dashboard_storage = {"version": 1, "minor_version": 1, "key": key, "data": {"config": config}}
     dashboard_storage["key"] = key
+    if bool(args.get("dry_run")):
+        return {"item": item, "key": key, "dry_run": True, "current_hash": path_hash(path), "would_backup": bool(args.get("backup", True)), "dashboard_storage": dashboard_storage}
+    backups: dict[str, Any] = {}
+    if bool(args.get("backup", True)):
+        if path.exists():
+            backups["dashboard"] = backup_path(path, args.get("label") or key)
+        registry_path = storage_path("lovelace_dashboards")
+        if registry_path.exists():
+            backups["registry"] = backup_path(registry_path, args.get("label") or "lovelace_dashboards")
     dashboard_info = dump_storage_json(key, dashboard_storage, args.get("mode"))
     registry_info = dump_storage_json("lovelace_dashboards", registry)
+    audit_event("save_lovelace_dashboard", {"key": key, "item": item, "backups": backups})
     return {"item": item, "key": key, "dashboard": dashboard_info, "registry": registry_info, "backups": backups}
 
 
@@ -2714,8 +2900,12 @@ def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     registry, item = resolve_lovelace_dashboard(args)
     if item is None:
         raise ValueError("Dashboard not found")
+    if not bool(args.get("force")):
+        raise ValueError("delete_lovelace_dashboard requires force=true")
     key = dashboard_item_key(item)
     path = storage_path(key)
+    if bool(args.get("dry_run")):
+        return {"item": item, "key": key, "path": str(path), "dry_run": True, "exists": path.exists()}
     backups: dict[str, Any] = {}
     if bool(args.get("backup", True)):
         if path.exists():
@@ -2729,6 +2919,7 @@ def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     if path.exists():
         path.unlink()
         deleted = True
+    audit_event("delete_lovelace_dashboard", {"key": key, "item": item, "deleted_storage": deleted, "backups": backups})
     return {"item": item, "key": key, "deleted_storage": deleted, "registry": registry_info, "backups": backups}
 
 
