@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.22"
+APP_VERSION = "0.1.23"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -329,6 +329,22 @@ TOOLS = [
         {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
         ["query"],
     ),
+    tool_schema(
+        "batch_call_tools",
+        "Call multiple MCP tools sequentially and return compact per-call results",
+        {
+            "calls": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
+                    "required": ["name"],
+                },
+            },
+            "stop_on_error": {"type": "boolean"},
+        },
+        ["calls"],
+    ),
     tool_schema("stat_path", "Return filesystem metadata for any visible path", {"path": {"type": "string"}}, ["path"]),
     tool_schema(
         "list_dir",
@@ -340,6 +356,18 @@ TOOLS = [
         "read_file",
         "Read a file visible to the app",
         {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
+        ["path"],
+    ),
+    tool_schema(
+        "read_file_window",
+        "Read a byte window from a visible file so large files can be inspected without transport truncation",
+        {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "length": {"type": "integer", "minimum": 1, "maximum": 10000000}},
+        ["path"],
+    ),
+    tool_schema(
+        "read_file_lines",
+        "Read a line-numbered window from a visible text file",
+        {"path": {"type": "string"}, "start_line": {"type": "integer", "minimum": 1}, "line_count": {"type": "integer", "minimum": 1, "maximum": 10000}},
         ["path"],
     ),
     tool_schema(
@@ -418,6 +446,12 @@ TOOLS = [
         ["url"],
     ),
     tool_schema("check_config", "Run Home Assistant Core config check through Supervisor", {}, []),
+    tool_schema(
+        "ha_cli",
+        "Run common Home Assistant CLI-style actions through Supervisor/API calls, falling back to a local ha binary if present",
+        {"args": {"type": "array", "items": {"type": "string"}}, "timeout": {"type": "integer", "minimum": 1, "maximum": 3600}, "max_output_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000}},
+        ["args"],
+    ),
     tool_schema("core_info", "Return Home Assistant Core info through Supervisor", {}, []),
     tool_schema("host_info", "Return Home Assistant host info through Supervisor", {}, []),
     tool_schema("supervisor_info", "Return Supervisor info", {}, []),
@@ -451,6 +485,17 @@ TOOLS = [
         "check_reload_readiness",
         "Run a config check and report common reload/restart options available through services",
         {},
+        [],
+    ),
+    tool_schema(
+        "check_config_and_reload",
+        "Run config check, then reload selected domains/services if the check passes",
+        {
+            "domains": {"type": "array", "items": {"type": "string"}},
+            "services": {"type": "array", "items": {"type": "object"}},
+            "reload_core": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+        },
         [],
     ),
     tool_schema(
@@ -607,6 +652,12 @@ TOOLS = [
         ["path"],
     ),
     tool_schema(
+        "read_config_lines",
+        "Read a line-numbered window from a /config text file",
+        {"path": {"type": "string"}, "start_line": {"type": "integer", "minimum": 1}, "line_count": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        ["path"],
+    ),
+    tool_schema(
         "write_config_file",
         "Write a text file under /config, optionally backing up to /backup/ha-admin-mcp and running config check",
         {
@@ -632,6 +683,24 @@ TOOLS = [
             "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
         },
         [],
+    ),
+    tool_schema(
+        "patch_config_text",
+        "Guarded text or regex replacement in a /config file, with dry-run, backup, expected_hash, and optional config check",
+        {
+            "path": {"type": "string"},
+            "search": {"type": "string"},
+            "replace": {"type": "string"},
+            "regex": {"type": "boolean"},
+            "count": {"type": "integer", "minimum": 0},
+            "expected_count": {"type": "integer", "minimum": 0},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+            "check_config": {"type": "boolean"},
+        },
+        ["path", "search", "replace"],
     ),
     tool_schema(
         "tail_log",
@@ -664,6 +733,12 @@ TOOLS = [
         ["key"],
     ),
     tool_schema(
+        "read_storage_key_window",
+        "Read a byte window from a Home Assistant .storage key",
+        {"key": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "length": {"type": "integer", "minimum": 1, "maximum": 10000000}},
+        ["key"],
+    ),
+    tool_schema(
         "search_storage_key",
         "Search text inside a Home Assistant .storage key",
         {"key": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
@@ -686,6 +761,12 @@ TOOLS = [
         "Read one JSON subpath inside a Home Assistant .storage key",
         {"key": {"type": "string"}, "path": {"type": "string"}},
         ["key", "path"],
+    ),
+    tool_schema(
+        "read_storage_json_paths",
+        "Read multiple JSON subpaths inside a Home Assistant .storage key in one call",
+        {"key": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}},
+        ["key", "paths"],
     ),
     tool_schema(
         "patch_storage_json_path",
@@ -795,6 +876,12 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "get_lovelace_dashboard_outline",
+        "Return a compact dashboard outline with view/card paths, titles, types, and entities",
+        {"id": {"type": "string"}, "url_path": {"type": "string"}, "key": {"type": "string"}, "include_entities": {"type": "boolean"}, "include_badges": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
         "get_lovelace_dashboard",
         "Read one Lovelace dashboard by id, url_path, or storage key",
         {
@@ -871,6 +958,93 @@ TOOLS = [
             "patch": {"type": "object"},
             "replace": {"type": "object"},
             "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        [],
+    ),
+    tool_schema(
+        "patch_lovelace_json_path",
+        "Patch, replace, append to, insert into, or remove one Lovelace dashboard JSON path",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "path": {"type": "string"},
+            "patch": {"type": "object"},
+            "replace": {},
+            "append": {},
+            "insert": {},
+            "index": {"type": "integer", "minimum": 0},
+            "remove": {"type": "boolean"},
+            "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        ["path"],
+    ),
+    tool_schema(
+        "insert_lovelace_card",
+        "Insert or append a card into one Lovelace view while preserving the rest of the dashboard",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "view_path": {"type": "string"},
+            "card": {"type": "object"},
+            "index": {"type": "integer", "minimum": 0},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        ["card"],
+    ),
+    tool_schema(
+        "delete_lovelace_card",
+        "Delete exactly one Lovelace card by path or filters while preserving the rest of the dashboard",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "query": {"type": "string"},
+            "entity": {"type": "string"},
+            "card_type": {"type": "string"},
+            "path": {"type": "string"},
+            "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+            "force": {"type": "boolean"},
+        },
+        [],
+    ),
+    tool_schema(
+        "move_lovelace_card",
+        "Move exactly one Lovelace card to another view/index while preserving the rest of the dashboard",
+        {
+            "id": {"type": "string"},
+            "url_path": {"type": "string"},
+            "key": {"type": "string"},
+            "path": {"type": "string"},
+            "query": {"type": "string"},
+            "entity": {"type": "string"},
+            "card_type": {"type": "string"},
+            "view_index": {"type": "integer", "minimum": 0},
+            "view_title": {"type": "string"},
+            "target_view_index": {"type": "integer", "minimum": 0},
+            "target_view_title": {"type": "string"},
+            "target_index": {"type": "integer", "minimum": 0},
             "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100},
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
@@ -1179,6 +1353,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return get_version()
     if name == "search_tools":
         return search_tools(args["query"], int(args.get("limit") or 10))
+    if name == "batch_call_tools":
+        return batch_call_tools(args)
     if name == "stat_path":
         path = Path(args["path"])
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
@@ -1189,6 +1365,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "read_file":
         content, truncated = read_limited(Path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
         return {"path": args["path"], "content": content, "truncated": truncated}
+    if name == "read_file_window":
+        return read_file_window(Path(args["path"]), int(args.get("offset") or 0), int(args.get("length") or 100000))
+    if name == "read_file_lines":
+        return read_file_lines(Path(args["path"]), int(args.get("start_line") or 1), int(args.get("line_count") or 200))
     if name == "read_file_base64":
         data, truncated = read_bytes_limited(Path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
         return {"path": args["path"], "content_base64": base64.b64encode(data).decode(), "truncated": truncated}
@@ -1246,7 +1426,9 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "http_request":
         return http_request(args)
     if name == "check_config":
-        return supervisor_request("POST", "/core/check")
+        return run_config_check()
+    if name == "ha_cli":
+        return ha_cli(args)
     if name == "core_info":
         return supervisor_request("GET", "/core/info")
     if name == "host_info":
@@ -1280,6 +1462,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return ha_request("POST", "/services/homeassistant/reload_core_config")
     if name == "check_reload_readiness":
         return check_reload_readiness()
+    if name == "check_config_and_reload":
+        return check_config_and_reload(args)
     if name == "reload_domain_config":
         audit_event("reload_domain_config", {"domain": args["domain"]})
         return ha_request("POST", f"/services/{args['domain']}/reload", args.get("data") or {})
@@ -1345,12 +1529,16 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "read_config_file":
         content, truncated = read_limited(config_path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
         return {"path": str(config_path(args["path"])), "relative_path": args["path"], "content": content, "truncated": truncated}
+    if name == "read_config_lines":
+        return read_file_lines(config_path(args["path"]), int(args.get("start_line") or 1), int(args.get("line_count") or 200)) | {"relative_path": args["path"]}
     if name == "write_config_file":
         return write_config_file(args)
     if name == "search_config":
         search_args = dict(args)
         search_args["path"] = str(config_path(search_args.get("path") or "."))
         return search_files(search_args)
+    if name == "patch_config_text":
+        return patch_config_text(args)
     if name == "tail_log":
         return tail_log(args)
     if name == "list_storage_keys":
@@ -1359,12 +1547,16 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_storage_keys_filtered(args)
     if name == "read_storage_key":
         return read_storage_key(args["key"], int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "read_storage_key_window":
+        return read_file_window(storage_path(args["key"]), int(args.get("offset") or 0), int(args.get("length") or 100000))
     if name == "search_storage_key":
         return search_storage_key(args["key"], args["query"], int(args.get("limit") or 50))
     if name == "search_storage_json":
         return search_storage_json(args)
     if name == "read_storage_json_path":
         return read_storage_json_path(args["key"], args["path"])
+    if name == "read_storage_json_paths":
+        return read_storage_json_paths(args["key"], args["paths"])
     if name == "patch_storage_json_path":
         return patch_storage_json_path(args)
     if name == "search_entity_registry":
@@ -1387,6 +1579,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "list_lovelace_dashboards":
         return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "get_lovelace_dashboard_outline":
+        return get_lovelace_dashboard_outline(args)
     if name == "get_lovelace_dashboard":
         return get_lovelace_dashboard(args, int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "get_lovelace_view":
@@ -1397,6 +1591,14 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return find_lovelace_cards(args)
     if name == "patch_lovelace_card":
         return patch_lovelace_card(args)
+    if name == "patch_lovelace_json_path":
+        return patch_lovelace_json_path(args)
+    if name == "insert_lovelace_card":
+        return insert_lovelace_card(args)
+    if name == "delete_lovelace_card":
+        return delete_lovelace_card(args)
+    if name == "move_lovelace_card":
+        return move_lovelace_card(args)
     if name == "save_lovelace_dashboard":
         return save_lovelace_dashboard(args)
     if name == "delete_lovelace_dashboard":
@@ -1452,6 +1654,32 @@ def get_version() -> str:
     if isinstance(info, dict) and isinstance(info.get("data"), dict):
         info = info["data"]
     return str(info.get("version") or info.get("homeassistant") or info)
+
+
+def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
+    calls = args.get("calls") or []
+    if not isinstance(calls, list):
+        raise ValueError("calls must be a list")
+    stop_on_error = bool(args.get("stop_on_error", True))
+    results = []
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict):
+            row = {"index": index, "error": "call must be an object"}
+        else:
+            tool_name = str(call.get("name") or "")
+            if not tool_name:
+                row = {"index": index, "error": "name is required"}
+            elif tool_name == "batch_call_tools":
+                row = {"index": index, "name": tool_name, "error": "batch_call_tools cannot call itself"}
+            else:
+                try:
+                    row = {"index": index, "name": tool_name, "result": call_tool(tool_name, call.get("arguments") or {})}
+                except Exception as err:
+                    row = {"index": index, "name": tool_name, "error": str(err)}
+        results.append(row)
+        if stop_on_error and row.get("error"):
+            break
+    return {"count": len(results), "results": results}
 
 
 def search_tools(query: str, limit: int) -> dict[str, Any]:
@@ -1889,6 +2117,38 @@ def hash_file(path: Path, algorithm: str) -> dict[str, Any]:
     return {"path": str(path), "algorithm": algorithm, "hexdigest": digest.hexdigest(), "size": path.stat().st_size}
 
 
+def read_file_window(path: Path, offset: int, length: int) -> dict[str, Any]:
+    size = path.stat().st_size
+    offset = max(0, min(offset, size))
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read(length)
+    return {
+        "path": str(path),
+        "offset": offset,
+        "length": len(data),
+        "size": size,
+        "next_offset": offset + len(data),
+        "has_more": offset + len(data) < size,
+        "content": data.decode("utf-8", errors="replace"),
+    }
+
+
+def read_file_lines(path: Path, start_line: int, line_count: int) -> dict[str, Any]:
+    rows = []
+    end_line = start_line + line_count - 1
+    total = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for number, line in enumerate(handle, 1):
+            total = number
+            if number < start_line:
+                continue
+            if number > end_line:
+                break
+            rows.append({"line": number, "text": line.rstrip("\n\r")})
+    return {"path": str(path), "start_line": start_line, "line_count": len(rows), "total_lines_seen": total, "has_more": total > end_line, "lines": rows}
+
+
 def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
     root = Path(args["path"])
     query = str(args.get("query") or "").lower()
@@ -1988,6 +2248,43 @@ def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def patch_config_text(args: dict[str, Any]) -> dict[str, Any]:
+    path = config_path(args["path"])
+    require_expected_hash(path, args.get("expected_hash"))
+    before_text = path.read_text(encoding="utf-8", errors="replace")
+    search = str(args["search"])
+    replace = str(args["replace"])
+    count = int(args.get("count") if args.get("count") is not None else 0)
+    if bool(args.get("regex")):
+        after_text, changed = re.subn(search, replace, before_text, count=count)
+    else:
+        changed = before_text.count(search) if count == 0 else min(before_text.count(search), count)
+        after_text = before_text.replace(search, replace) if count == 0 else before_text.replace(search, replace, count)
+    expected = args.get("expected_count")
+    if expected is not None and changed != int(expected):
+        raise ValueError(f"expected_count mismatch for {path}: expected {expected}, actual {changed}")
+    before_hash = path_hash(path)
+    result = {
+        "path": str(path),
+        "relative_path": args["path"],
+        "changed_count": changed,
+        "before_hash": before_hash,
+        "after_hash": hashlib.sha256(after_text.encode()).hexdigest(),
+        "dry_run": bool(args.get("dry_run")),
+        "would_backup": bool(path.exists() and args.get("backup", True)),
+        "would_check_config": bool(args.get("check_config", False)),
+    }
+    if bool(args.get("dry_run")):
+        return result
+    backup = backup_path(path, args.get("label") or args["path"]) if bool(args.get("backup", True)) else None
+    path.write_text(after_text, encoding="utf-8")
+    result["backup"] = backup
+    if bool(args.get("check_config", False)):
+        result["check_config"] = supervisor_request("POST", "/core/check")
+    audit_event("patch_config_text", {"path": str(path), "changed_count": changed, "backup": backup, "check_config": bool(args.get("check_config", False))})
+    return result
+
+
 def tail_log(args: dict[str, Any]) -> dict[str, Any]:
     explicit_path = bool(args.get("path"))
     raw_path = args.get("path") or "/config/home-assistant.log"
@@ -2015,7 +2312,7 @@ def tail_log(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_reload_readiness() -> dict[str, Any]:
-    check = supervisor_request("POST", "/core/check")
+    check = run_config_check()
     services = ha_request("GET", "/services")
     reloads = []
     for domain in services:
@@ -2024,6 +2321,102 @@ def check_reload_readiness() -> dict[str, Any]:
             if service.startswith("reload"):
                 reloads.append({"domain": domain_name, "service": service})
     return {"check_config": check, "reload_services": reloads}
+
+
+def run_config_check(retries: int = 3, delay: float = 2.0) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return supervisor_request("POST", "/core/check")
+        except RuntimeError as err:
+            last_error = err
+            if "Another job is running" not in str(err) or attempt >= retries:
+                raise
+            time.sleep(delay)
+    raise last_error or RuntimeError("config check failed")
+
+
+def emulate_ha_cli(argv: list[str]) -> Any:
+    if not argv:
+        return {"supported": ["core", "supervisor", "host", "addons", "apps", "store"], "note": "ha binary is not installed in this app image; common commands are emulated through Supervisor/API calls."}
+    group = argv[0]
+    rest = argv[1:]
+    if group == "core":
+        action = rest[0] if rest else "info"
+        if action == "info":
+            return supervisor_request("GET", "/core/info")
+        if action == "check":
+            return run_config_check()
+        if action in {"restart", "stop", "start"}:
+            return supervisor_request("POST", f"/core/{action}")
+    if group == "supervisor":
+        action = rest[0] if rest else "info"
+        if action == "info":
+            return supervisor_request("GET", "/supervisor/info")
+    if group == "host":
+        action = rest[0] if rest else "info"
+        if action == "info":
+            return supervisor_request("GET", "/host/info")
+    if group == "store":
+        action = rest[0] if rest else "info"
+        if action == "reload":
+            return supervisor_request("POST", "/store/reload")
+        if action == "info":
+            return supervisor_request("GET", "/store")
+    if group in {"addons", "apps"}:
+        if not rest:
+            return supervisor_request("GET", "/addons")
+        action = rest[0]
+        if action in {"info", "logs", "start", "stop", "restart", "rebuild", "update", "install", "uninstall"} and len(rest) >= 2:
+            slug = rest[1]
+            method = "GET" if action in {"info", "logs"} else "POST"
+            return supervisor_request(method, f"/addons/{slug}/{action}")
+    raise ValueError(f"Unsupported emulated ha command: {' '.join(argv)}")
+
+
+def ha_cli(args: dict[str, Any]) -> dict[str, Any]:
+    argv = ["ha"] + [str(value) for value in (args.get("args") or [])]
+    timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
+    max_output = int(args.get("max_output_bytes") or 20000)
+    audit_event("ha_cli", {"args": argv})
+    if shutil.which("ha") is None:
+        return {"args": argv, "emulated": True, "result": emulate_ha_cli(argv[1:])}
+    completed = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+    return {
+        "args": argv,
+        "emulated": False,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout[:max_output],
+        "stderr": completed.stderr[:max_output],
+        "stdout_truncated": len(completed.stdout) > max_output,
+        "stderr_truncated": len(completed.stderr) > max_output,
+    }
+
+
+def check_config_and_reload(args: dict[str, Any]) -> dict[str, Any]:
+    check = run_config_check()
+    result: dict[str, Any] = {"check_config": check, "dry_run": bool(args.get("dry_run")), "reloads": []}
+    check_payload = check.get("data", check) if isinstance(check, dict) else check
+    if isinstance(check_payload, dict) and check_payload.get("result") not in (None, "valid"):
+        result["skipped"] = "config check did not report valid"
+        return result
+    domains = [str(domain) for domain in (args.get("domains") or [])]
+    services = args.get("services") or []
+    if bool(args.get("reload_core")):
+        services.append({"domain": "homeassistant", "service": "reload_core_config", "data": {}})
+    for domain in domains:
+        services.append({"domain": domain, "service": "reload", "data": {}})
+    for service in services:
+        domain = service.get("domain")
+        service_name = service.get("service") or "reload"
+        data = service.get("data") or {}
+        row = {"domain": domain, "service": service_name, "data": data}
+        if not args.get("dry_run"):
+            row["result"] = ha_request("POST", f"/services/{domain}/{service_name}", data)
+        result["reloads"].append(row)
+    if result["reloads"] and not args.get("dry_run"):
+        audit_event("check_config_and_reload", {"reloads": result["reloads"]})
+    return result
 
 
 def storage_path(key: str) -> Path:
@@ -2153,6 +2546,18 @@ def search_storage_json(args: dict[str, Any]) -> dict[str, Any]:
 def read_storage_json_path(key: str, path: str) -> dict[str, Any]:
     data = load_storage_json(key)
     return {"key": key, "path": path, "value": value_at_path(data, path)}
+
+
+def read_storage_json_paths(key: str, paths: list[Any]) -> dict[str, Any]:
+    data = load_storage_json(key)
+    rows = []
+    for path in paths:
+        text_path = str(path)
+        try:
+            rows.append({"path": text_path, "value": value_at_path(data, text_path)})
+        except Exception as err:
+            rows.append({"path": text_path, "error": str(err)})
+    return {"key": key, "count": len(rows), "values": rows}
 
 
 def patch_storage_json_path(args: dict[str, Any]) -> dict[str, Any]:
@@ -2829,6 +3234,221 @@ def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
     info = dump_storage_json(key, storage)
     audit_event("patch_lovelace_card", {"key": key, "path": target_path, "backups": backups})
     return {"changed": True, "item": item, "key": key, "path": target_path, "before": before, "after": after, "dashboard": info, "backups": backups}
+
+
+def lovelace_save_mutation(args: dict[str, Any], key: str, storage: dict[str, Any], action: str, details: dict[str, Any]) -> dict[str, Any]:
+    backups: dict[str, Any] = {}
+    if bool(args.get("backup", True)):
+        backups["dashboard"] = backup_path(storage_path(key), args.get("label") or key)
+    info = dump_storage_json(key, storage)
+    audit_event(action, {"key": key, "details": details, "backups": backups})
+    return {"dashboard": info, "backups": backups}
+
+
+def get_lovelace_dashboard_outline(args: dict[str, Any]) -> dict[str, Any]:
+    item, _storage, key, config = dashboard_storage(args)
+    views = dashboard_views(config)
+    rows = []
+    for view_index, view in enumerate(views):
+        if not isinstance(view, dict):
+            rows.append({"index": view_index, "view": view})
+            continue
+        view_row: dict[str, Any] = {
+            "index": view_index,
+            "path": f"$.data.config.views[{view_index}]",
+            "title": view.get("title"),
+            "view_path": view.get("path"),
+            "type": view.get("type"),
+            "card_count": len(view.get("cards") or []) if isinstance(view.get("cards"), list) else 0,
+        }
+        if bool(args.get("include_badges")):
+            view_row["badges"] = view.get("badges")
+        cards = []
+        for row in iter_lovelace_cards(view, f"$.data.config.views[{view_index}]"):
+            card_row = {"path": row["path"], "type": row.get("type"), "title": row.get("title")}
+            if bool(args.get("include_entities", True)):
+                card_row["entities"] = row.get("entities", [])
+            cards.append(card_row)
+        view_row["cards"] = cards
+        rows.append(view_row)
+    return {"item": item, "key": key, "view_count": len(rows), "views": rows}
+
+
+def resolve_view_index(config: dict[str, Any], args: dict[str, Any], prefix: str = "") -> int:
+    views = dashboard_views(config)
+    index_key = f"{prefix}view_index"
+    title_key = f"{prefix}view_title"
+    path_key = f"{prefix}view_path"
+    if args.get(index_key) is not None:
+        index = int(args[index_key])
+        if index < 0 or index >= len(views):
+            raise ValueError(f"{index_key} is out of range")
+        return index
+    matches = []
+    for index, view in enumerate(views):
+        if not isinstance(view, dict):
+            continue
+        if args.get(title_key) is not None and str(view.get("title") or "") == str(args[title_key]):
+            matches.append(index)
+        elif args.get(path_key) is not None and str(view.get("path") or "") == str(args[path_key]):
+            matches.append(index)
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one view match for prefix {prefix!r}, found {len(matches)}")
+    return matches[0]
+
+
+def remove_value_at_path(root: Any, path: str) -> Any:
+    parts = path_parts(path)
+    if not parts:
+        raise ValueError("Cannot remove dashboard root")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[part]
+    last = parts[-1]
+    if isinstance(parent, list) and isinstance(last, int):
+        return parent.pop(last)
+    if isinstance(parent, dict) and isinstance(last, str):
+        return parent.pop(last)
+    raise ValueError(f"Cannot remove {path}")
+
+
+def patch_lovelace_json_path(args: dict[str, Any]) -> dict[str, Any]:
+    item, storage, key, _config = dashboard_storage(args)
+    storage_file = storage_path(key)
+    require_expected_hash(storage_file, args.get("expected_hash"))
+    path = args["path"]
+    before = None if bool(args.get("remove")) else json.loads(json.dumps(value_at_path(storage, path), default=str))
+    operation = None
+    after: Any = None
+    if bool(args.get("remove")):
+        removed = remove_value_at_path(storage, path)
+        operation = "remove"
+        after = None
+    elif args.get("replace") is not None:
+        set_value_at_path(storage, path, args["replace"])
+        operation = "replace"
+        after = args["replace"]
+    else:
+        target = value_at_path(storage, path)
+        if args.get("append") is not None:
+            if not isinstance(target, list):
+                raise ValueError("append target must be a list")
+            target.append(args["append"])
+            operation = "append"
+            after = {"length": len(target), "appended": args["append"]}
+        elif args.get("insert") is not None:
+            if not isinstance(target, list):
+                raise ValueError("insert target must be a list")
+            index = int(args.get("index") if args.get("index") is not None else len(target))
+            target.insert(index, args["insert"])
+            operation = "insert"
+            after = {"length": len(target), "index": index, "inserted": args["insert"]}
+        elif args.get("patch") is not None or args.get("remove_keys"):
+            if not isinstance(target, dict):
+                raise ValueError("patch/remove_keys target must be an object")
+            for key_name in args.get("remove_keys") or []:
+                target.pop(str(key_name), None)
+            if args.get("patch") is not None:
+                patch = args["patch"]
+                if not isinstance(patch, dict):
+                    raise ValueError("patch must be an object")
+                target.update(patch)
+            operation = "patch"
+            after = json.loads(json.dumps(target, default=str))
+        else:
+            raise ValueError("Pass patch, replace, append, insert, remove=true, or remove_keys")
+    if bool(args.get("dry_run")):
+        return {"changed": False, "dry_run": True, "item": item, "key": key, "path": path, "operation": operation, "before": before, "after": after, "current_hash": path_hash(storage_file)}
+    saved = lovelace_save_mutation(args, key, storage, "patch_lovelace_json_path", {"path": path, "operation": operation})
+    return {"changed": True, "item": item, "key": key, "path": path, "operation": operation, "before": before, "after": after} | saved
+
+
+def insert_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    item, storage, key, config = dashboard_storage(args)
+    storage_file = storage_path(key)
+    require_expected_hash(storage_file, args.get("expected_hash"))
+    view_index = resolve_view_index(config, args)
+    view = dashboard_views(config)[view_index]
+    if not isinstance(view, dict):
+        raise ValueError("Matched view is not an object")
+    cards = view.setdefault("cards", [])
+    if not isinstance(cards, list):
+        raise ValueError("Matched view cards is not a list")
+    index = int(args.get("index") if args.get("index") is not None else len(cards))
+    if index < 0 or index > len(cards):
+        raise ValueError("index is out of range")
+    card = args["card"]
+    before_count = len(cards)
+    cards.insert(index, card)
+    path = f"$.data.config.views[{view_index}].cards[{index}]"
+    if bool(args.get("dry_run")):
+        return {"changed": False, "dry_run": True, "item": item, "key": key, "view_index": view_index, "index": index, "path": path, "before_count": before_count, "after_count": len(cards), "current_hash": path_hash(storage_file), "card": card}
+    saved = lovelace_save_mutation(args, key, storage, "insert_lovelace_card", {"view_index": view_index, "index": index, "path": path})
+    return {"changed": True, "item": item, "key": key, "view_index": view_index, "index": index, "path": path, "before_count": before_count, "after_count": len(cards), "card": card} | saved
+
+
+def matched_card_path(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str, str, dict[str, Any]]:
+    item, storage, key, _config = dashboard_storage(args)
+    search = find_lovelace_cards(args)
+    matches = search["matches"]
+    expected = int(args.get("expected_matches") or 1)
+    if len(matches) != expected:
+        raise ValueError(f"Expected {expected} card match(es), found {len(matches)}")
+    if expected != 1:
+        raise ValueError("This operation requires expected_matches=1")
+    path = matches[0]["path"]
+    card = value_at_path(storage, path)
+    return item, storage, key, path, card
+
+
+def delete_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("force")):
+        raise ValueError("delete_lovelace_card requires force=true")
+    item, storage, key, path, card = matched_card_path(args)
+    storage_file = storage_path(key)
+    require_expected_hash(storage_file, args.get("expected_hash"))
+    before = json.loads(json.dumps(card, default=str))
+    if bool(args.get("dry_run")):
+        return {"changed": False, "dry_run": True, "item": item, "key": key, "path": path, "card": before, "current_hash": path_hash(storage_file)}
+    removed = remove_value_at_path(storage, path)
+    saved = lovelace_save_mutation(args, key, storage, "delete_lovelace_card", {"path": path})
+    return {"changed": True, "item": item, "key": key, "path": path, "card": removed} | saved
+
+
+def move_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    item, storage, key, source_path, card = matched_card_path(args)
+    storage_file = storage_path(key)
+    require_expected_hash(storage_file, args.get("expected_hash"))
+    config = storage.get("data", {}).get("config")
+    if not isinstance(config, dict):
+        raise ValueError("Dashboard storage does not contain data.config")
+    target_view_index = resolve_view_index(config, args, "target_")
+    target_view = dashboard_views(config)[target_view_index]
+    if not isinstance(target_view, dict):
+        raise ValueError("Target view is not an object")
+    target_cards = target_view.setdefault("cards", [])
+    if not isinstance(target_cards, list):
+        raise ValueError("Target view cards is not a list")
+    target_index = int(args.get("target_index") if args.get("target_index") is not None else len(target_cards))
+    if target_index < 0 or target_index > len(target_cards):
+        raise ValueError("target_index is out of range")
+    moving = json.loads(json.dumps(card, default=str))
+    if bool(args.get("dry_run")):
+        return {"changed": False, "dry_run": True, "item": item, "key": key, "source_path": source_path, "target_view_index": target_view_index, "target_index": target_index, "card": moving, "current_hash": path_hash(storage_file)}
+    source_parts = path_parts(source_path)
+    if len(source_parts) >= 6 and source_parts[:3] == ["data", "config", "views"] and source_parts[4] == "cards":
+        source_view_index = source_parts[3]
+        source_card_index = source_parts[5]
+        if source_view_index == target_view_index and isinstance(source_card_index, int) and source_card_index < target_index:
+            target_index -= 1
+    removed = remove_value_at_path(storage, source_path)
+    target_cards = target_view.setdefault("cards", [])
+    if target_index > len(target_cards):
+        target_index = len(target_cards)
+    target_cards.insert(target_index, removed)
+    target_path = f"$.data.config.views[{target_view_index}].cards[{target_index}]"
+    saved = lovelace_save_mutation(args, key, storage, "move_lovelace_card", {"source_path": source_path, "target_path": target_path})
+    return {"changed": True, "item": item, "key": key, "source_path": source_path, "target_path": target_path, "card": moving} | saved
 
 
 def lovelace_storage_path(key: str) -> Path:
