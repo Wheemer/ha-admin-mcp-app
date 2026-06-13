@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.16"
+APP_VERSION = "0.1.17"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -184,6 +185,46 @@ def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
         raise RuntimeError(f"Home Assistant API {err.code}: {payload}") from err
 
 
+def http_request(args: dict[str, Any]) -> dict[str, Any]:
+    method = str(args.get("method") or ("POST" if args.get("data") is not None or args.get("text") is not None else "GET")).upper()
+    headers = {str(key): str(value) for key, value in (args.get("headers") or {}).items()}
+    body = None
+    if args.get("text") is not None:
+        body = str(args["text"]).encode()
+    elif args.get("data") is not None:
+        body = json.dumps(args["data"]).encode()
+        headers.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(args["url"], data=body, method=method, headers=headers)
+    timeout = int(args.get("timeout") or 120)
+    max_bytes = int(args.get("max_bytes") or 2_000_000)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = response.read(max_bytes + 1)
+            truncated = len(data) > max_bytes
+            if truncated:
+                data = data[:max_bytes]
+            text = data.decode("utf-8", errors="replace")
+            return {
+                "url": args["url"],
+                "status": response.status,
+                "headers": dict(response.headers.items()),
+                "content": text,
+                "truncated": truncated,
+            }
+    except urllib.error.HTTPError as err:
+        data = err.read(max_bytes + 1)
+        truncated = len(data) > max_bytes
+        if truncated:
+            data = data[:max_bytes]
+        return {
+            "url": args["url"],
+            "status": err.code,
+            "headers": dict(err.headers.items()),
+            "content": data.decode("utf-8", errors="replace"),
+            "truncated": truncated,
+        }
+
+
 def tool_schema(name: str, description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
     return {
         "name": name,
@@ -299,6 +340,20 @@ TOOLS = [
         "Call the Home Assistant Supervisor API",
         {"method": {"type": "string"}, "endpoint": {"type": "string"}, "data": {"type": "object"}},
         ["endpoint"],
+    ),
+    tool_schema(
+        "http_request",
+        "Make an arbitrary HTTP request from inside the HA app container",
+        {
+            "method": {"type": "string"},
+            "url": {"type": "string"},
+            "headers": {"type": "object"},
+            "data": {"type": "object"},
+            "text": {"type": "string"},
+            "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
+        },
+        ["url"],
     ),
     tool_schema("check_config", "Run Home Assistant Core config check through Supervisor", {}, []),
     tool_schema("core_info", "Return Home Assistant Core info through Supervisor", {}, []),
@@ -487,6 +542,26 @@ TOOLS = [
         ["key", "query"],
     ),
     tool_schema(
+        "read_storage_json_path",
+        "Read one JSON subpath inside a Home Assistant .storage key",
+        {"key": {"type": "string"}, "path": {"type": "string"}},
+        ["key", "path"],
+    ),
+    tool_schema(
+        "patch_storage_json_path",
+        "Patch, replace, or remove keys from one JSON subpath inside a Home Assistant .storage key",
+        {
+            "key": {"type": "string"},
+            "path": {"type": "string"},
+            "patch": {"type": "object"},
+            "replace": {},
+            "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+        },
+        ["key", "path"],
+    ),
+    tool_schema(
         "search_entity_registry",
         "Filter core.entity_registry without returning the whole registry",
         {
@@ -534,6 +609,36 @@ TOOLS = [
             "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
         },
         [],
+    ),
+    tool_schema(
+        "search_area_registry",
+        "Filter core.area_registry without returning the whole file",
+        {"id": {"type": "string"}, "name": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
+        "search_floor_registry",
+        "Filter core.floor_registry without returning the whole file",
+        {"id": {"type": "string"}, "name": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
+        "search_label_registry",
+        "Filter core.label_registry without returning the whole file",
+        {"id": {"type": "string"}, "name": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
+        "sqlite_query",
+        "Run a read-only SQLite query, defaulting to Home Assistant recorder DB",
+        {
+            "path": {"type": "string"},
+            "query": {"type": "string"},
+            "parameters": {"type": "array"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
+        },
+        ["query"],
     ),
     tool_schema(
         "read_lovelace_dashboards",
@@ -839,6 +944,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return ha_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
     if name == "supervisor_api":
         return supervisor_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
+    if name == "http_request":
+        return http_request(args)
     if name == "check_config":
         return supervisor_request("POST", "/core/check")
     if name == "core_info":
@@ -921,6 +1028,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_storage_key(args["key"], args["query"], int(args.get("limit") or 50))
     if name == "search_storage_json":
         return search_storage_json(args)
+    if name == "read_storage_json_path":
+        return read_storage_json_path(args["key"], args["path"])
+    if name == "patch_storage_json_path":
+        return patch_storage_json_path(args)
     if name == "search_entity_registry":
         return search_entity_registry(args)
     if name == "get_entity_registry_entry":
@@ -929,6 +1040,14 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_device_registry(args)
     if name == "search_config_entries":
         return search_config_entries(args)
+    if name == "search_area_registry":
+        return search_named_registry("core.area_registry", "areas", args)
+    if name == "search_floor_registry":
+        return search_named_registry("core.floor_registry", "floors", args)
+    if name == "search_label_registry":
+        return search_named_registry("core.label_registry", "labels", args)
+    if name == "sqlite_query":
+        return sqlite_query(args)
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "list_lovelace_dashboards":
@@ -1236,6 +1355,36 @@ def search_storage_json(args: dict[str, Any]) -> dict[str, Any]:
     return {"key": key, "truncated": truncated, "count": min(len(matches), limit), "matches": matches[:limit]}
 
 
+def read_storage_json_path(key: str, path: str) -> dict[str, Any]:
+    data = load_storage_json(key)
+    return {"key": key, "path": path, "value": value_at_path(data, path)}
+
+
+def patch_storage_json_path(args: dict[str, Any]) -> dict[str, Any]:
+    key = args["key"]
+    data = load_storage_json(key)
+    path = args["path"]
+    target = value_at_path(data, path)
+    before = json.loads(json.dumps(target, default=str))
+    if args.get("replace") is not None:
+        set_value_at_path(data, path, args["replace"])
+        after = args["replace"]
+    else:
+        if not isinstance(target, dict):
+            raise ValueError("Target path must be an object when using patch or remove_keys")
+        for key_name in args.get("remove_keys") or []:
+            target.pop(str(key_name), None)
+        patch = args.get("patch") or {}
+        if patch:
+            if not isinstance(patch, dict):
+                raise ValueError("patch must be an object")
+            target.update(patch)
+        after = json.loads(json.dumps(target, default=str))
+    backup = backup_path(storage_path(key), args.get("label") or key) if bool(args.get("backup", True)) and storage_path(key).exists() else None
+    info = dump_storage_json(key, data)
+    return {"key": key, "path": path, "before": before, "after": after, "backup": backup, "storage": info}
+
+
 def contains_text(value: Any, query: str) -> bool:
     return query.lower() in json.dumps(value, default=str).lower()
 
@@ -1339,6 +1488,49 @@ def search_config_entries(args: dict[str, Any]) -> dict[str, Any]:
             continue
         matches.append(row)
     return {"key": "core.config_entries", "count": len(matches), "matches": matches}
+
+
+def search_named_registry(key: str, list_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    data = load_storage_json(key)
+    rows = data.get("data", {}).get(list_name, [])
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for row in rows:
+        if len(matches) >= limit:
+            break
+        if args.get("id") and str(row.get("id") or "") != str(args["id"]):
+            continue
+        if args.get("name") and str(args["name"]).lower() not in str(row.get("name") or "").lower():
+            continue
+        if query and not contains_text(row, query):
+            continue
+        matches.append(row)
+    return {"key": key, "count": len(matches), "matches": matches}
+
+
+def sqlite_query(args: dict[str, Any]) -> dict[str, Any]:
+    path = Path(args.get("path") or "/config/home-assistant_v2.db")
+    query = str(args["query"]).strip()
+    if not query:
+        raise ValueError("query cannot be empty")
+    allowed = ("select", "pragma", "with", "explain")
+    if not query.lower().startswith(allowed):
+        raise ValueError("Only read-only SQLite queries are allowed")
+    limit = int(args.get("limit") or 100)
+    timeout = int(args.get("timeout") or 30)
+    uri = f"file:{urllib.parse.quote(str(path), safe='/:')}?mode=ro"
+    start = time.time()
+    with sqlite3.connect(uri, uri=True, timeout=timeout) as connection:
+        connection.row_factory = sqlite3.Row
+        cursor = connection.execute(query, args.get("parameters") or [])
+        columns = [description[0] for description in cursor.description or []]
+        rows = []
+        for row in cursor:
+            rows.append({column: row[column] for column in columns})
+            if len(rows) >= limit:
+                break
+    return {"path": str(path), "columns": columns, "rows": rows, "count": len(rows), "limit": limit, "elapsed_seconds": round(time.time() - start, 3)}
 
 
 def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str, Any]:
