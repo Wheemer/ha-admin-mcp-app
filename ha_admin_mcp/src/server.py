@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.20"
+APP_VERSION = "0.1.21"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -1644,7 +1644,10 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         return {"note": "Integration enable/disable is available through raw storage/API tools; refusing to guess config-entry mutation shape.", "matching_entries": search_config_entries({"domain": domain, "limit": 20})}
     if name in ("ha_list_floors_areas", "ha_set_area_or_floor", "ha_remove_area_or_floor"):
         if name == "ha_list_floors_areas":
-            return {"areas": search_area_registry({"limit": 10000}), "floors": search_floor_registry({"limit": 10000})}
+            return {
+                "areas": search_named_registry("core.area_registry", "areas", {"limit": 10000}),
+                "floors": search_named_registry("core.floor_registry", "floors", {"limit": 10000}),
+            }
         registry_key = "core.floor_registry" if args.get("kind") == "floor" else "core.area_registry"
         list_name = "floors" if args.get("kind") == "floor" else "areas"
         return patch_named_registry(registry_key, list_name, args, remove=name.startswith("ha_remove"))
