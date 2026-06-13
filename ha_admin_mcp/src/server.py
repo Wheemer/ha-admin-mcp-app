@@ -4,6 +4,7 @@ import fnmatch
 import base64
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -14,12 +15,13 @@ import urllib.parse
 import uuid
 import glob
 import hashlib
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.17"
+APP_VERSION = "0.1.18"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -267,6 +269,13 @@ TOOLS = [
         {"include_values": {"type": "boolean"}},
         [],
     ),
+    tool_schema("get_version", "Compatibility tool: return Home Assistant Core version", {}, []),
+    tool_schema(
+        "search_tools",
+        "Search this MCP server's tool catalog by name, description, or schema",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+        ["query"],
+    ),
     tool_schema("stat_path", "Return filesystem metadata for any visible path", {"path": {"type": "string"}}, ["path"]),
     tool_schema(
         "list_dir",
@@ -410,6 +419,53 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "get_entity",
+        "Compatibility tool: get one entity with optional field projection",
+        {"entity_id": {"type": "string"}, "fields": {"type": "array", "items": {"type": "string"}}, "detailed": {"type": "boolean"}},
+        ["entity_id"],
+    ),
+    tool_schema(
+        "entity_action",
+        "Compatibility tool: turn an entity on, off, or toggle it",
+        {"entity_id": {"type": "string"}, "action": {"type": "string", "enum": ["on", "off", "toggle"]}, "params": {"type": "object"}},
+        ["entity_id", "action"],
+    ),
+    tool_schema(
+        "list_entities",
+        "Compatibility tool: list entities with optional domain, area, state, query, and projection filters",
+        {
+            "domain": {"type": "string"},
+            "area": {"type": "string"},
+            "state": {"type": "string"},
+            "query": {"type": "string"},
+            "fields": {"type": "array", "items": {"type": "string"}},
+            "detailed": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "offset": {"type": "integer", "minimum": 0},
+        },
+        [],
+    ),
+    tool_schema(
+        "search_entities",
+        "Compatibility tool: text search entities across state, attributes, registry, and area",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        ["query"],
+    ),
+    tool_schema(
+        "get_entities_by_area",
+        "Compatibility tool: list entities assigned to an area name or id",
+        {"area": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        ["area"],
+    ),
+    tool_schema(
+        "domain_summary",
+        "Compatibility tool: summarize one HA domain with counts, states, and examples",
+        {"domain": {"type": "string"}, "example_limit": {"type": "integer", "minimum": 1, "maximum": 20}},
+        ["domain"],
+    ),
+    tool_schema("system_overview", "Compatibility tool: compact overview of entities/domains/areas/system version", {}, []),
+    tool_schema("list_automations", "Compatibility tool: list automation entities", {}, []),
+    tool_schema(
         "get_events",
         "Return Home Assistant event names",
         {},
@@ -430,6 +486,35 @@ TOOLS = [
             "minimal_response": {"type": "boolean"},
             "no_attributes": {"type": "boolean"},
             "significant_changes_only": {"type": "boolean"},
+        },
+        [],
+    ),
+    tool_schema(
+        "get_history_range",
+        "Compatibility tool: get raw state-change history for one entity over an explicit time window",
+        {"entity_id": {"type": "string"}, "start_time": {"type": "string"}, "end_time": {"type": "string"}},
+        ["entity_id", "start_time"],
+    ),
+    tool_schema(
+        "get_statistics",
+        "Compatibility tool: get recorder long-term statistics for the last N hours",
+        {"entity_id": {"type": "string"}, "hours": {"type": "integer", "minimum": 1, "maximum": 100000}, "period": {"type": "string"}},
+        ["entity_id"],
+    ),
+    tool_schema(
+        "get_statistics_range",
+        "Compatibility tool: get recorder long-term statistics for one entity over a time window",
+        {"entity_id": {"type": "string"}, "start_time": {"type": "string"}, "end_time": {"type": "string"}, "period": {"type": "string"}},
+        ["entity_id", "start_time"],
+    ),
+    tool_schema(
+        "get_error_log",
+        "Compatibility tool: get/filter Home Assistant error log with counts",
+        {
+            "level": {"type": "string"},
+            "integration": {"type": "string"},
+            "search_term": {"type": "string"},
+            "lines": {"type": "integer", "minimum": 1, "maximum": 100000},
         },
         [],
     ),
@@ -897,6 +982,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         }
     if name == "get_environment":
         return get_environment(bool(args.get("include_values")))
+    if name == "get_version":
+        return get_version()
+    if name == "search_tools":
+        return search_tools(args["query"], int(args.get("limit") or 10))
     if name == "stat_path":
         path = Path(args["path"])
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
@@ -979,6 +1068,22 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "get_states":
         entity_id = args.get("entity_id")
         return ha_request("GET", f"/states/{entity_id}" if entity_id else "/states")
+    if name == "get_entity":
+        return get_entity(args)
+    if name == "entity_action":
+        return entity_action(args)
+    if name == "list_entities":
+        return list_entities(args)
+    if name == "search_entities":
+        return search_entities(args["query"], int(args.get("limit") or 20))
+    if name == "get_entities_by_area":
+        return get_entities_by_area(args["area"], int(args.get("limit") or 500))
+    if name == "domain_summary":
+        return domain_summary(args["domain"], int(args.get("example_limit") or 3))
+    if name == "system_overview":
+        return system_overview()
+    if name == "list_automations":
+        return list_automations()
     if name == "get_events":
         return ha_request("GET", "/events")
     if name == "get_services":
@@ -999,6 +1104,14 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
             },
         )
         return ha_request("GET", endpoint)
+    if name == "get_history_range":
+        return get_history_range(args)
+    if name == "get_statistics":
+        return get_statistics(args)
+    if name == "get_statistics_range":
+        return get_statistics_range(args)
+    if name == "get_error_log":
+        return get_error_log(args)
     if name == "render_template":
         return ha_request("POST", "/template", {"template": args["template"]})
     if name == "fire_event":
@@ -1092,6 +1205,165 @@ def get_environment(include_values: bool) -> dict[str, Any]:
                 value = path.read_text(errors="replace").strip()
                 rows["s6"][path.name] = redact(path.name, value)
     return rows
+
+
+def get_version() -> str:
+    info = supervisor_request("GET", "/core/info")
+    return str(info.get("version") or info.get("homeassistant") or info)
+
+
+def search_tools(query: str, limit: int) -> dict[str, Any]:
+    needle = query.lower()
+    rows = []
+    for tool in TOOLS:
+        haystack = json.dumps(tool, default=str).lower()
+        if needle in haystack:
+            rows.append(
+                {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "required": tool.get("inputSchema", {}).get("required", []),
+                    "properties": sorted((tool.get("inputSchema", {}).get("properties") or {}).keys()),
+                }
+            )
+            if len(rows) >= limit:
+                break
+    return {"query": query, "count": len(rows), "matches": rows}
+
+
+def project_field(value: Any, field: str) -> Any:
+    if field.startswith("attr."):
+        return (value.get("attributes") or {}).get(field.removeprefix("attr."))
+    current = value
+    for part in field.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def project_entity_state(state: dict[str, Any], fields: list[str] | None, detailed: bool = False) -> dict[str, Any]:
+    if detailed:
+        return state
+    if fields:
+        return {field: project_field(state, field) for field in fields}
+    attributes = state.get("attributes") or {}
+    return {
+        "entity_id": state.get("entity_id"),
+        "state": state.get("state"),
+        "friendly_name": attributes.get("friendly_name"),
+        "last_changed": state.get("last_changed"),
+    }
+
+
+def registry_maps() -> dict[str, Any]:
+    entities = load_storage_json("core.entity_registry").get("data", {}).get("entities", [])
+    devices = load_storage_json("core.device_registry").get("data", {}).get("devices", [])
+    areas = load_storage_json("core.area_registry").get("data", {}).get("areas", [])
+    area_by_id = {area.get("id"): area for area in areas}
+    device_by_id = {device.get("id"): device for device in devices}
+    entity_by_id = {entity.get("entity_id"): entity for entity in entities}
+    return {"area_by_id": area_by_id, "device_by_id": device_by_id, "entity_by_id": entity_by_id}
+
+
+def entity_area_name(entity_id: str, maps: dict[str, Any]) -> str | None:
+    entry = maps["entity_by_id"].get(entity_id) or {}
+    area_id = entry.get("area_id")
+    if not area_id and entry.get("device_id"):
+        area_id = (maps["device_by_id"].get(entry["device_id"]) or {}).get("area_id")
+    area = maps["area_by_id"].get(area_id) or {}
+    return area.get("name") or area_id
+
+
+def get_entity(args: dict[str, Any]) -> dict[str, Any]:
+    state = ha_request("GET", f"/states/{args['entity_id']}")
+    return project_entity_state(state, args.get("fields"), bool(args.get("detailed")))
+
+
+def entity_action(args: dict[str, Any]) -> Any:
+    entity_id = args["entity_id"]
+    action = args["action"]
+    service = action if action == "toggle" else f"turn_{action}"
+    domain = entity_id.split(".", 1)[0]
+    data = {"entity_id": entity_id} | (args.get("params") or {})
+    return ha_request("POST", f"/services/{domain}/{service}", data)
+
+
+def list_entities(args: dict[str, Any]) -> dict[str, Any]:
+    states = ha_request("GET", "/states")
+    maps = registry_maps()
+    domain = args.get("domain")
+    wanted_area = str(args.get("area") or "").lower()
+    wanted_state = args.get("state")
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 500)
+    offset = int(args.get("offset") or 0)
+    rows = []
+    for state in states:
+        entity_id = state.get("entity_id", "")
+        if domain and entity_id.split(".", 1)[0] != domain:
+            continue
+        if wanted_state is not None and str(state.get("state")) != str(wanted_state):
+            continue
+        area = entity_area_name(entity_id, maps)
+        if wanted_area and wanted_area not in str(area or "").lower():
+            continue
+        if query and query not in json.dumps(state, default=str).lower() and query not in json.dumps(maps["entity_by_id"].get(entity_id, {}), default=str).lower():
+            continue
+        row = project_entity_state(state, args.get("fields"), bool(args.get("detailed")))
+        if area:
+            row["area"] = area
+        rows.append(row)
+    total = len(rows)
+    rows = rows[offset : offset + limit]
+    return {"count": len(rows), "total": total, "offset": offset, "limit": limit, "entities": rows}
+
+
+def search_entities(query: str, limit: int) -> dict[str, Any]:
+    return list_entities({"query": query, "limit": limit, "detailed": False})
+
+
+def get_entities_by_area(area: str, limit: int) -> dict[str, Any]:
+    return list_entities({"area": area, "limit": limit, "detailed": False})
+
+
+def domain_summary(domain: str, example_limit: int) -> dict[str, Any]:
+    states = [state for state in ha_request("GET", "/states") if str(state.get("entity_id", "")).split(".", 1)[0] == domain]
+    state_counts: dict[str, int] = {}
+    attr_counts: dict[str, int] = {}
+    examples = []
+    for state in states:
+        state_counts[str(state.get("state"))] = state_counts.get(str(state.get("state")), 0) + 1
+        for attr in (state.get("attributes") or {}):
+            attr_counts[attr] = attr_counts.get(attr, 0) + 1
+        if len(examples) < example_limit:
+            examples.append(project_entity_state(state))
+    return {"domain": domain, "count": len(states), "states": state_counts, "common_attributes": attr_counts, "examples": examples}
+
+
+def system_overview() -> dict[str, Any]:
+    states = ha_request("GET", "/states")
+    maps = registry_maps()
+    domains: dict[str, int] = {}
+    areas: dict[str, int] = {}
+    for state in states:
+        entity_id = state.get("entity_id", "")
+        domain = entity_id.split(".", 1)[0]
+        domains[domain] = domains.get(domain, 0) + 1
+        area = entity_area_name(entity_id, maps)
+        if area:
+            areas[area] = areas.get(area, 0) + 1
+    return {
+        "version": get_version(),
+        "total_entities": len(states),
+        "domains": dict(sorted(domains.items())),
+        "areas": dict(sorted(areas.items())),
+        "core": supervisor_request("GET", "/core/info"),
+    }
+
+
+def list_automations() -> dict[str, Any]:
+    return list_entities({"domain": "automation", "detailed": True, "limit": 10000})
 
 
 def glob_paths(pattern: str, limit: int) -> list[dict[str, Any]]:
@@ -1531,6 +1803,132 @@ def sqlite_query(args: dict[str, Any]) -> dict[str, Any]:
             if len(rows) >= limit:
                 break
     return {"path": str(path), "columns": columns, "rows": rows, "count": len(rows), "limit": limit, "elapsed_seconds": round(time.time() - start, 3)}
+
+
+def parse_time(value: str | None) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def history_endpoint(start: datetime, end: datetime, entity_id: str) -> str:
+    endpoint = f"/history/period/{urllib.parse.quote(start.isoformat(), safe=':TZ+-')}"
+    return maybe_query(endpoint, {"filter_entity_id": entity_id, "minimal_response": "true", "end_time": end.isoformat()})
+
+
+def flatten_history(entity_id: str, history_data: Any) -> dict[str, Any]:
+    states = []
+    if isinstance(history_data, list):
+        for bucket in history_data:
+            if isinstance(bucket, list):
+                states.extend(bucket)
+    states.sort(key=lambda row: row.get("last_changed", ""))
+    return {
+        "entity_id": entity_id,
+        "states": states,
+        "count": len(states),
+        "first_changed": states[0].get("last_changed") if states else None,
+        "last_changed": states[-1].get("last_changed") if states else None,
+    }
+
+
+def get_history_range(args: dict[str, Any]) -> dict[str, Any]:
+    start = parse_time(args["start_time"])
+    end = parse_time(args.get("end_time"))
+    if start >= end:
+        raise ValueError("start_time must be before end_time")
+    return flatten_history(args["entity_id"], ha_request("GET", history_endpoint(start, end, args["entity_id"])))
+
+
+def sqlite_columns(path: Path, table: str) -> set[str]:
+    result = sqlite_query({"path": str(path), "query": f"pragma table_info({table})", "limit": 100})
+    return {row["name"] for row in result["rows"]}
+
+
+def get_statistics_range(args: dict[str, Any]) -> dict[str, Any]:
+    entity_id = args["entity_id"]
+    start = parse_time(args["start_time"])
+    end = parse_time(args.get("end_time"))
+    if start >= end:
+        raise ValueError("start_time must be before end_time")
+    path = Path("/config/home-assistant_v2.db")
+    stat_cols = sqlite_columns(path, "statistics")
+    meta_id_col = "metadata_id"
+    start_col = "start_ts" if "start_ts" in stat_cols else "start"
+    use_ts = start_col.endswith("_ts")
+    start_value: Any = start.timestamp() if use_ts else start.isoformat()
+    end_value: Any = end.timestamp() if use_ts else end.isoformat()
+    period = args.get("period") or "hour"
+    if period not in {"5minute", "hour", "day", "week", "month"}:
+        raise ValueError("period must be one of 5minute, hour, day, week, month")
+    table = "statistics_short_term" if period == "5minute" else "statistics"
+    columns = sqlite_columns(path, table)
+    start_col = "start_ts" if "start_ts" in columns else "start"
+    select_cols = [column for column in (start_col, "mean", "min", "max", "state", "sum") if column in columns]
+    query = (
+        f"select {', '.join('s.' + column for column in select_cols)} "
+        f"from {table} s join statistics_meta m on s.{meta_id_col} = m.id "
+        f"where m.statistic_id = ? and s.{start_col} >= ? and s.{start_col} <= ? "
+        f"order by s.{start_col}"
+    )
+    result = sqlite_query({"path": str(path), "query": query, "parameters": [entity_id, start_value, end_value], "limit": int(args.get("limit") or 1000)})
+    return {"entity_id": entity_id, "period": period, "start_time": start.isoformat(), "end_time": end.isoformat(), "statistics": result["rows"], "count": result["count"]}
+
+
+def get_statistics(args: dict[str, Any]) -> dict[str, Any]:
+    hours = int(args.get("hours") or 24)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours)
+    range_args = dict(args)
+    range_args["start_time"] = start.isoformat()
+    range_args["end_time"] = end.isoformat()
+    return get_statistics_range(range_args)
+
+
+def get_error_log(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        raw = supervisor_request("GET", "/core/logs")
+        text = raw.get("content", raw) if isinstance(raw, dict) else raw
+    except Exception:
+        try:
+            raw = ha_request("GET", "/error_log")
+            text = raw.get("content", raw) if isinstance(raw, dict) else raw
+        except Exception as err:
+            return {"error": str(err), "log_text": "", "error_count": 0, "warning_count": 0, "integration_mentions": {}}
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", str(text))
+    rows = clean.splitlines()
+    if args.get("level"):
+        needle = str(args["level"]).upper()
+        rows = [row for row in rows if needle in row.upper()]
+    if args.get("integration"):
+        needle = str(args["integration"]).lower()
+        bare = f"[{needle}]"
+        namespaced = f"[homeassistant.components.{needle}]"
+        rows = [row for row in rows if bare in row.lower() or namespaced in row.lower()]
+    if args.get("search_term"):
+        needle = str(args["search_term"]).lower()
+        rows = [row for row in rows if needle in row.lower()]
+    if args.get("lines"):
+        rows = rows[-int(args["lines"]) :]
+    filtered = "\n".join(rows)
+    mentions: dict[str, int] = {}
+    for match in re.finditer(r"\[([a-zA-Z0-9_\.]+)\]", filtered):
+        name = match.group(1).lower()
+        if name.startswith("homeassistant.components."):
+            name = name.split(".")[-1]
+        mentions[name] = mentions.get(name, 0) + 1
+    return {
+        "log_text": filtered,
+        "error_count": filtered.count("ERROR"),
+        "warning_count": filtered.count("WARNING"),
+        "integration_mentions": mentions,
+        "total_lines": len(rows),
+        "filters_applied": {key: value for key, value in args.items() if value not in (None, "")},
+    }
 
 
 def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str, Any]:

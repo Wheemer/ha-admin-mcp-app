@@ -27,13 +27,14 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 ## Main Tool Groups
 
 - Shell and host control: `run_command`, `run_shell`, `get_environment`
+- Upstream compatibility and discovery: `get_version`, `search_tools`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `list_automations`
 - Filesystem control: `stat_path`, `list_dir`, `read_file`, `read_file_base64`, `write_file`, `write_file_base64`, `delete_path`, `search_files`, `glob_paths`, `hash_file`
 - Home Assistant APIs: `ha_api`, `supervisor_api`, `http_request`, `call_service`, `get_states`, `get_events`, `get_services`, `get_history`, `render_template`, `fire_event`
 - Supervisor/Core operations: `check_config`, `check_reload_readiness`, `core_info`, `host_info`, `supervisor_info`, `store_info`, `app_info`, `app_logs`, `app_control`, `restart_core`, `stop_core`, `start_core`, `reload_core_config`, `reload_domain_config`
 - Config files: `list_config_files`, `read_config_file`, `write_config_file`, `search_config`, `tail_log`
 - Storage and registries: `list_storage_keys`, `list_storage_keys_filtered`, `read_storage_key`, `search_storage_key`, `search_storage_json`, `read_storage_json_path`, `patch_storage_json_path`, `write_storage_key`, `delete_storage_key`, `backup_storage_key`, `search_entity_registry`, `get_entity_registry_entry`, `search_device_registry`, `search_config_entries`, `search_area_registry`, `search_floor_registry`, `search_label_registry`
 - Lovelace dashboards: `read_lovelace_dashboards`, `list_lovelace_dashboards`, `get_lovelace_dashboard`, `get_lovelace_view`, `get_lovelace_card`, `find_lovelace_cards`, `patch_lovelace_card`, `save_lovelace_dashboard`, `delete_lovelace_dashboard`
-- Recorder/database: `sqlite_query`
+- Recorder/database: `sqlite_query`, `get_history_range`, `get_statistics`, `get_statistics_range`, `get_error_log`
 - Backups: `backup_path`
 
 ## MCP Protocol Surface
