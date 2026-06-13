@@ -28,6 +28,7 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 
 - Shell and host control: `run_command`, `run_shell`, `get_environment`
 - Upstream compatibility and discovery: `get_version`, `search_tools`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `list_automations`
+- `homeassistant-ai/ha-mcp` compatibility shims: the upstream `ha_*` tool names are exposed and routed through this app's full-access primitives where a direct equivalent exists.
 - Filesystem control: `stat_path`, `list_dir`, `read_file`, `read_file_base64`, `write_file`, `write_file_base64`, `delete_path`, `search_files`, `glob_paths`, `hash_file`
 - Home Assistant APIs: `ha_api`, `supervisor_api`, `http_request`, `call_service`, `get_states`, `get_events`, `get_services`, `get_history`, `render_template`, `fire_event`
 - Supervisor/Core operations: `check_config`, `check_reload_readiness`, `core_info`, `host_info`, `supervisor_info`, `store_info`, `app_info`, `app_logs`, `app_control`, `restart_core`, `stop_core`, `start_core`, `reload_core_config`, `reload_domain_config`

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.19"
+APP_VERSION = "0.1.20"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 MAX_READ_BYTES = 20_000_000
@@ -869,6 +869,129 @@ TOOLS = [
 ]
 
 
+UPSTREAM_HA_MCP_TOOL_NAMES = [
+    "ha_get_addon",
+    "ha_manage_addon",
+    "ha_list_floors_areas",
+    "ha_remove_area_or_floor",
+    "ha_set_area_or_floor",
+    "ha_manage_pipeline",
+    "ha_config_get_automation",
+    "ha_config_remove_automation",
+    "ha_config_set_automation",
+    "ha_get_blueprint",
+    "ha_import_blueprint",
+    "ha_config_get_calendar_events",
+    "ha_config_remove_calendar_event",
+    "ha_config_set_calendar_event",
+    "ha_get_camera_image",
+    "ha_get_dashboard_screenshot",
+    "ha_config_delete_dashboard_resource",
+    "ha_config_delete_dashboard",
+    "ha_config_get_dashboard",
+    "ha_config_list_dashboard_resources",
+    "ha_config_set_dashboard_resource",
+    "ha_config_set_dashboard",
+    "ha_get_device",
+    "ha_remove_device",
+    "ha_set_device",
+    "ha_manage_energy_prefs",
+    "ha_get_entity_exposure",
+    "ha_get_entity",
+    "ha_remove_entity",
+    "ha_set_entity",
+    "ha_delete_file",
+    "ha_list_files",
+    "ha_read_file",
+    "ha_write_file",
+    "ha_config_list_groups",
+    "ha_config_remove_group",
+    "ha_config_set_group",
+    "ha_get_hacs_info",
+    "ha_manage_hacs",
+    "ha_config_list_helpers",
+    "ha_config_set_helper",
+    "ha_remove_helpers_integrations",
+    "ha_get_automation_traces",
+    "ha_get_history",
+    "ha_get_logs",
+    "ha_get_integration",
+    "ha_get_system_health",
+    "ha_set_integration_enabled",
+    "ha_config_get_category",
+    "ha_config_get_label",
+    "ha_config_remove_category",
+    "ha_config_remove_label",
+    "ha_config_set_category",
+    "ha_config_set_label",
+    "ha_config_get_scene",
+    "ha_config_remove_scene",
+    "ha_config_set_scene",
+    "ha_config_get_script",
+    "ha_config_remove_script",
+    "ha_config_set_script",
+    "ha_get_overview",
+    "ha_get_state",
+    "ha_search",
+    "ha_bulk_control",
+    "ha_call_event",
+    "ha_call_service",
+    "ha_get_operation_status",
+    "ha_list_services",
+    "ha_config_set_yaml",
+    "ha_get_updates",
+    "ha_manage_backup",
+    "ha_manage_custom_tool",
+    "ha_manage_theme",
+    "ha_reload_core",
+    "ha_restart",
+    "ha_get_todo",
+    "ha_remove_todo_item",
+    "ha_set_todo_item",
+    "ha_get_zone",
+    "ha_remove_zone",
+    "ha_set_zone",
+    "ha_eval_template",
+    "ha_install_mcp_tools",
+    "ha_report_issue",
+]
+
+
+UPSTREAM_COMPAT_TOOL_SCHEMAS = [
+    tool_schema(
+        name,
+        f"homeassistant-ai/ha-mcp compatibility shim for {name}; routed through this app's full-access HA admin primitives",
+        {
+            "entity_id": {"type": "string"},
+            "identifier": {"type": "string"},
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "query": {"type": "string"},
+            "domain": {"type": "string"},
+            "service": {"type": "string"},
+            "action": {"type": "string"},
+            "data": {"type": "object"},
+            "config": {"type": "object"},
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "template": {"type": "string"},
+            "slug": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "start_time": {"type": "string"},
+            "end_time": {"type": "string"},
+            "hours": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "period": {"type": "string"},
+            "backup": {"type": "boolean"},
+        },
+        [],
+    )
+    for name in UPSTREAM_HA_MCP_TOOL_NAMES
+]
+
+
+TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
+
+
 RESOURCES = [
     {"uri": "ha://core/info", "name": "Home Assistant Core info", "mimeType": "application/json"},
     {"uri": "ha://supervisor/info", "name": "Supervisor info", "mimeType": "application/json"},
@@ -938,6 +1061,8 @@ PROMPTS = [
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
+    if name in UPSTREAM_HA_MCP_TOOL_NAMES:
+        return call_upstream_compat_tool(name, args)
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
@@ -1366,6 +1491,232 @@ def system_overview() -> dict[str, Any]:
 
 def list_automations() -> dict[str, Any]:
     return list_entities({"domain": "automation", "detailed": True, "limit": 10000})
+
+
+def first_present(args: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        value = args.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def compat_identifier(args: dict[str, Any]) -> str | None:
+    return first_present(args, "entity_id", "identifier", "id", "name", "slug")
+
+
+def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
+    identifier = compat_identifier(args)
+    if name in ("ha_get_state", "ha_get_entity"):
+        if not identifier:
+            raise ValueError("entity_id or identifier is required")
+        return get_entity({"entity_id": identifier, "fields": args.get("fields"), "detailed": bool(args.get("detailed", True))})
+    if name == "ha_search":
+        query = str(args.get("query") or "")
+        return {"entities": search_entities(query, int(args.get("limit") or 20)), "tools": search_tools(query, 10)}
+    if name == "ha_get_overview":
+        return system_overview()
+    if name == "ha_get_system_health":
+        return {
+            "overview": system_overview(),
+            "reload_readiness": check_reload_readiness(),
+            "logs": get_error_log({"level": "ERROR", "lines": 50}),
+        }
+    if name == "ha_restart":
+        return supervisor_request("POST", "/core/restart")
+    if name == "ha_reload_core":
+        return ha_request("POST", "/services/homeassistant/reload_core_config")
+    if name == "ha_eval_template":
+        template = args.get("template") or args.get("content")
+        if not template:
+            raise ValueError("template is required")
+        return ha_request("POST", "/template", {"template": template})
+    if name == "ha_call_service":
+        domain = args.get("domain")
+        service = args.get("service") or args.get("action")
+        if not domain or not service:
+            raise ValueError("domain and service are required")
+        return ha_request("POST", f"/services/{domain}/{service}", args.get("data") or {})
+    if name == "ha_call_event":
+        event_type = args.get("event_type") or args.get("name") or args.get("event")
+        if not event_type:
+            raise ValueError("event_type/name is required")
+        return ha_request("POST", f"/events/{event_type}", args.get("data") or {})
+    if name == "ha_bulk_control":
+        operations = args.get("operations") or []
+        if not isinstance(operations, list):
+            raise ValueError("operations must be a list")
+        return {"results": [call_upstream_compat_tool("ha_call_service", operation) for operation in operations]}
+    if name == "ha_list_services":
+        return ha_request("GET", "/services")
+    if name == "ha_get_logs":
+        return get_error_log(args)
+    if name == "ha_get_history":
+        if args.get("start_time"):
+            return get_history_range(args)
+        if not identifier:
+            raise ValueError("entity_id or identifier is required")
+        hours = int(args.get("hours") or 24)
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(hours=hours)
+        return flatten_history(identifier, ha_request("GET", history_endpoint(start, end, identifier)))
+    if name == "ha_get_automation_traces":
+        entity_id = identifier
+        if not entity_id:
+            raise ValueError("entity_id or identifier is required")
+        automation_id = entity_id.removeprefix("automation.")
+        return ha_request("GET", f"/config/automation/trace/{automation_id}")
+    if name == "ha_get_operation_status":
+        return {"core": supervisor_request("GET", "/core/info"), "supervisor": supervisor_request("GET", "/supervisor/info")}
+    if name == "ha_get_addon":
+        slug = args.get("slug") or identifier
+        if not slug:
+            raise ValueError("slug is required")
+        return supervisor_request("GET", f"/addons/{slug}/info")
+    if name == "ha_manage_addon":
+        slug = args.get("slug") or identifier
+        action = args.get("action")
+        if not slug:
+            raise ValueError("slug is required")
+        if action in {"start", "stop", "restart", "rebuild", "update", "install", "uninstall"}:
+            return supervisor_request("POST", f"/addons/{slug}/{action}")
+        if action == "get" or not action:
+            return supervisor_request("GET", f"/addons/{slug}/info")
+        return supervisor_request("POST", f"/addons/{slug}/{action}", args.get("data"))
+    if name in ("ha_list_files", "ha_read_file", "ha_write_file", "ha_delete_file"):
+        path = args.get("path") or "."
+        if name == "ha_list_files":
+            return list_config_files({"path": path, "recursive": bool(args.get("recursive")), "limit": int(args.get("limit") or 500)})
+        if name == "ha_read_file":
+            content, truncated = read_limited(config_path(path), int(args.get("max_bytes") or MAX_READ_BYTES))
+            return {"path": path, "content": content, "truncated": truncated}
+        if name == "ha_write_file":
+            return write_config_file({"path": path, "content": args.get("content") or "", "backup": bool(args.get("backup", True)), "check_config": bool(args.get("check_config", False))})
+        target = config_path(path)
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        return {"path": str(target), "deleted": True}
+    if name == "ha_config_set_yaml":
+        path = args.get("path") or "configuration.yaml"
+        return write_config_file({"path": path, "content": args.get("content") or json.dumps(args.get("config") or {}, indent=2), "backup": bool(args.get("backup", True)), "check_config": bool(args.get("check_config", True))})
+    if name in ("ha_config_get_dashboard", "ha_config_set_dashboard", "ha_config_delete_dashboard"):
+        dash_args = {
+            "id": args.get("dashboard_id") or args.get("id") or args.get("identifier"),
+            "url_path": args.get("url_path"),
+            "key": args.get("key"),
+            "config": args.get("config"),
+            "data": args.get("data"),
+            "content": args.get("content"),
+            "title": args.get("title"),
+            "create": bool(args.get("create", True)),
+            "backup": bool(args.get("backup", True)),
+        }
+        if name == "ha_config_get_dashboard":
+            return get_lovelace_dashboard(dash_args, int(args.get("max_bytes") or MAX_READ_BYTES))
+        if name == "ha_config_set_dashboard":
+            return save_lovelace_dashboard(dash_args)
+        return delete_lovelace_dashboard(dash_args)
+    if name == "ha_config_list_dashboard_resources":
+        return read_storage_key("lovelace_resources", MAX_READ_BYTES)
+    if name in ("ha_config_set_dashboard_resource", "ha_config_delete_dashboard_resource"):
+        resources = load_storage_json("lovelace_resources")
+        resources.setdefault("data", {}).setdefault("items", [])
+        item_id = args.get("id") or args.get("url") or args.get("resource_id")
+        if name == "ha_config_delete_dashboard_resource":
+            resources["data"]["items"] = [item for item in resources["data"]["items"] if item.get("id") != item_id and item.get("url") != item_id]
+        else:
+            item = args.get("resource") or args.get("data") or {"id": item_id, "url": args.get("url"), "type": args.get("type")}
+            resources["data"]["items"] = [old for old in resources["data"]["items"] if old.get("id") != item.get("id") and old.get("url") != item.get("url")]
+            resources["data"]["items"].append(item)
+        return dump_storage_json("lovelace_resources", resources)
+    if name == "ha_get_device":
+        if identifier:
+            return search_device_registry({"id": identifier, "query": identifier, "limit": 20})
+        return search_device_registry({"query": args.get("query") or "", "limit": int(args.get("limit") or 20)})
+    if name in ("ha_set_device", "ha_remove_device"):
+        return {"note": "Use search_device_registry plus patch_storage_json_path on core.device_registry for exact device registry edits.", "args": args}
+    if name in ("ha_get_integration", "ha_set_integration_enabled"):
+        domain = args.get("domain") or identifier
+        if name == "ha_get_integration":
+            return search_config_entries({"domain": domain, "query": args.get("query"), "limit": int(args.get("limit") or 20)})
+        return {"note": "Integration enable/disable is available through raw storage/API tools; refusing to guess config-entry mutation shape.", "matching_entries": search_config_entries({"domain": domain, "limit": 20})}
+    if name in ("ha_list_floors_areas", "ha_set_area_or_floor", "ha_remove_area_or_floor"):
+        if name == "ha_list_floors_areas":
+            return {"areas": search_area_registry({"limit": 10000}), "floors": search_floor_registry({"limit": 10000})}
+        registry_key = "core.floor_registry" if args.get("kind") == "floor" else "core.area_registry"
+        list_name = "floors" if args.get("kind") == "floor" else "areas"
+        return patch_named_registry(registry_key, list_name, args, remove=name.startswith("ha_remove"))
+    if name in ("ha_config_get_label", "ha_config_set_label", "ha_config_remove_label", "ha_config_get_category", "ha_config_set_category", "ha_config_remove_category"):
+        is_label = "label" in name
+        registry_key = "core.label_registry" if is_label else "core.category_registry"
+        list_name = "labels" if is_label else "categories"
+        if "_get_" in name:
+            return search_named_registry(registry_key, list_name, {"id": identifier, "name": args.get("name"), "query": args.get("query"), "limit": int(args.get("limit") or 20)})
+        return patch_named_registry(registry_key, list_name, args, remove="_remove_" in name)
+    if name in ("ha_config_get_automation", "ha_config_get_script", "ha_config_get_scene"):
+        domain = {"ha_config_get_automation": "automation", "ha_config_get_script": "script", "ha_config_get_scene": "scene"}[name]
+        return ha_request("GET", f"/config/{domain}/config/{identifier}") if identifier else list_entities({"domain": domain, "detailed": True, "limit": 10000})
+    if name in ("ha_config_set_automation", "ha_config_set_script", "ha_config_set_scene"):
+        domain = "automation" if "automation" in name else "script" if "script" in name else "scene"
+        return ha_request("POST", f"/config/{domain}/config/{identifier or args.get('id')}", args.get("config") or args.get("data") or {})
+    if name in ("ha_config_remove_automation", "ha_config_remove_script", "ha_config_remove_scene"):
+        domain = "automation" if "automation" in name else "script" if "script" in name else "scene"
+        return ha_request("DELETE", f"/config/{domain}/config/{identifier}")
+    if name == "ha_manage_backup":
+        action = args.get("action") or "list"
+        if action == "list":
+            return supervisor_request("GET", "/backups")
+        if action in {"create", "new", "full"}:
+            return supervisor_request("POST", "/backups/new/full", args.get("data") or {})
+        slug = args.get("slug") or identifier
+        if action == "info" and slug:
+            return supervisor_request("GET", f"/backups/{slug}/info")
+        return supervisor_request("POST", f"/backups/{slug}/{action}", args.get("data") or {})
+    if name == "ha_get_updates":
+        return {"core": supervisor_request("GET", "/core/info"), "store": supervisor_request("GET", "/store")}
+    if name in ("ha_get_hacs_info", "ha_manage_hacs"):
+        return {"note": "HACS can be controlled through ha_api/supervisor_api/http_request; no dedicated HACS REST contract is assumed.", "hacs_entries": search_config_entries({"domain": "hacs", "limit": 20})}
+    if name in ("ha_get_zone", "ha_remove_zone", "ha_set_zone"):
+        return ha_request("GET", "/states/zone") if name == "ha_get_zone" and not identifier else {"note": "Use storage/API primitives for zone mutation.", "args": args}
+    if name in ("ha_get_todo", "ha_remove_todo_item", "ha_set_todo_item"):
+        if name == "ha_get_todo":
+            return ha_request("GET", f"/states/{identifier}") if identifier else list_entities({"domain": "todo", "detailed": True, "limit": 10000})
+        return ha_request("POST", f"/services/todo/{'remove_item' if 'remove' in name else 'add_item'}", args.get("data") or {})
+    if name == "ha_get_camera_image":
+        entity_id = identifier
+        if not entity_id:
+            raise ValueError("entity_id is required")
+        return ha_request("GET", f"/camera_proxy/{entity_id}")
+    if name == "ha_manage_theme":
+        return {"themes": search_files({"path": str(CONFIG_ROOT), "filename": "*.yaml", "query": args.get("query") or "frontend:", "recursive": True, "limit": int(args.get("limit") or 50)})}
+    if name == "ha_report_issue":
+        return {"title": args.get("title"), "body": args.get("body") or args.get("content"), "system_overview": system_overview()}
+    if name in ("ha_install_mcp_tools", "ha_manage_pipeline", "ha_manage_energy_prefs", "ha_config_list_groups", "ha_config_set_group", "ha_config_remove_group", "ha_config_list_helpers", "ha_config_set_helper", "ha_remove_helpers_integrations", "ha_get_blueprint", "ha_import_blueprint", "ha_config_get_calendar_events", "ha_config_set_calendar_event", "ha_config_remove_calendar_event", "ha_get_dashboard_screenshot", "ha_manage_custom_tool", "ha_get_entity_exposure", "ha_set_entity", "ha_remove_entity"):
+        return {
+            "note": "Compatibility shim present. Use this app's full-access primitives for exact execution when this high-level upstream workflow needs HA-specific payload details.",
+            "recommended_tools": ["ha_api", "supervisor_api", "http_request", "read_storage_json_path", "patch_storage_json_path", "run_command"],
+            "args": args,
+        }
+    raise ValueError(f"Unhandled upstream compatibility tool: {name}")
+
+
+def patch_named_registry(registry_key: str, list_name: str, args: dict[str, Any], remove: bool = False) -> dict[str, Any]:
+    data = load_storage_json(registry_key)
+    items = data.setdefault("data", {}).setdefault(list_name, [])
+    identifier = args.get("id") or args.get("identifier") or args.get("name")
+    if remove:
+        before = len(items)
+        data["data"][list_name] = [item for item in items if item.get("id") != identifier and item.get("name") != identifier]
+        info = dump_storage_json(registry_key, data)
+        return {"removed": before - len(data["data"][list_name]), "storage": info}
+    item = args.get("data") or args.get("config") or {}
+    if not item:
+        item = {"id": args.get("id") or make_dashboard_id(str(args.get("name") or "")), "name": args.get("name")}
+    items[:] = [old for old in items if old.get("id") != item.get("id")]
+    items.append(item)
+    return dump_storage_json(registry_key, data)
 
 
 def glob_paths(pattern: str, limit: int) -> list[dict[str, Any]]:
