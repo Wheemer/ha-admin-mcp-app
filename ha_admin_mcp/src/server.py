@@ -15,13 +15,15 @@ import urllib.parse
 import uuid
 import glob
 import hashlib
+import socket
+import struct
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.25"
+APP_VERSION = "0.1.26"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -33,6 +35,11 @@ LOG_LEVEL = "info"
 DANGEROUS_PATHS = {"/", "/config", "/backup", "/data", "/share", "/ssl", "/addons", "/usr", "/bin", "/sbin", "/etc", "/root", "/var"}
 READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "check", "render", "overview", "summary")
 DESTRUCTIVE_HINTS = ("delete", "remove", "restart", "stop", "write", "patch", "set", "save", "run", "shell", "control", "call", "fire", "manage")
+LOVELACE_STORAGE_EDIT_WARNING = (
+    "Reminder: storage-backed Lovelace edits are not the preferred path for UI changes. "
+    "Use live_lovelace_get_config/live_lovelace_save_config or the Home Assistant UI path when changing dashboards, "
+    "then verify the rendered UI."
+)
 TEXT_EXTENSIONS = {
     ".conf",
     ".css",
@@ -189,6 +196,96 @@ def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
     except urllib.error.HTTPError as err:
         payload = err.read().decode(errors="replace")
         raise RuntimeError(f"Home Assistant API {err.code}: {payload}") from err
+
+
+def ws_read_exact(sock: socket.socket, size: int) -> bytes:
+    chunks = []
+    remaining = size
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise RuntimeError("WebSocket closed unexpectedly")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def ws_send_text(sock: socket.socket, message: dict[str, Any]) -> None:
+    payload = json.dumps(message, default=str).encode()
+    header = bytearray([0x81])
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack("!Q", length))
+    mask = os.urandom(4)
+    header.extend(mask)
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    sock.sendall(bytes(header) + masked)
+
+
+def ws_recv_text(sock: socket.socket) -> dict[str, Any]:
+    while True:
+        first, second = ws_read_exact(sock, 2)
+        opcode = first & 0x0F
+        masked = bool(second & 0x80)
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", ws_read_exact(sock, 2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", ws_read_exact(sock, 8))[0]
+        mask = ws_read_exact(sock, 4) if masked else b""
+        payload = ws_read_exact(sock, length)
+        if masked:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        if opcode == 0x8:
+            raise RuntimeError("WebSocket closed")
+        if opcode == 0x9:
+            continue
+        if opcode == 0x1:
+            return json.loads(payload.decode("utf-8"))
+
+
+def ha_ws_call(message: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+    token = get_supervisor_token()
+    key = base64.b64encode(os.urandom(16)).decode()
+    request = (
+        "GET /core/websocket HTTP/1.1\r\n"
+        "Host: supervisor\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n\r\n"
+    ).encode()
+    with socket.create_connection(("supervisor", 80), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        sock.sendall(request)
+        response = b""
+        while b"\r\n\r\n" not in response:
+            response += sock.recv(4096)
+            if len(response) > 20000:
+                raise RuntimeError("WebSocket handshake response too large")
+        header = response.split(b"\r\n\r\n", 1)[0].decode(errors="replace")
+        if " 101 " not in header.splitlines()[0]:
+            raise RuntimeError(f"WebSocket handshake failed: {header}")
+        auth_required = ws_recv_text(sock)
+        if auth_required.get("type") != "auth_required":
+            raise RuntimeError(f"Unexpected WebSocket auth message: {auth_required}")
+        ws_send_text(sock, {"type": "auth", "access_token": token})
+        auth_ok = ws_recv_text(sock)
+        if auth_ok.get("type") != "auth_ok":
+            raise RuntimeError(f"WebSocket auth failed: {auth_ok}")
+        command = dict(message)
+        command.setdefault("id", 1)
+        ws_send_text(sock, command)
+        while True:
+            response_msg = ws_recv_text(sock)
+            if response_msg.get("id") == command["id"]:
+                return response_msg
 
 
 def http_request(args: dict[str, Any]) -> dict[str, Any]:
@@ -426,6 +523,12 @@ TOOLS = [
         ["endpoint"],
     ),
     tool_schema(
+        "ha_ws_call",
+        "Call the Home Assistant WebSocket API through the Supervisor token",
+        {"message": {"type": "object"}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}},
+        ["message"],
+    ),
+    tool_schema(
         "supervisor_api",
         "Call the Home Assistant Supervisor API",
         {"method": {"type": "string"}, "endpoint": {"type": "string"}, "data": {"type": "object"}},
@@ -574,6 +677,12 @@ TOOLS = [
         [],
     ),
     tool_schema("list_automations", "Compatibility tool: list automation entities", {}, []),
+    tool_schema("list_automation_configs", "List automation entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("get_automation_config", "Get compact automation config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("list_script_configs", "List script entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("list_scene_configs", "List scene entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("get_scene_config", "Get compact scene config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema(
         "get_events",
         "Return Home Assistant event names",
@@ -1008,6 +1117,19 @@ TOOLS = [
         {"include_content": {"type": "boolean"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
         [],
     ),
+    tool_schema(
+        "live_lovelace_get_config",
+        "Read the active Lovelace config through the Home Assistant WebSocket API",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}},
+        [],
+    ),
+    tool_schema(
+        "live_lovelace_save_config",
+        "Save Lovelace config through the Home Assistant WebSocket API instead of storage writes",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "config": {"type": "object"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}},
+        ["config"],
+    ),
+    tool_schema("live_lovelace_resources", "List Lovelace resources through the Home Assistant WebSocket API", {}, []),
     tool_schema(
         "list_lovelace_dashboards",
         "List Lovelace dashboards from HA's dashboard registry with matching storage keys",
@@ -1558,6 +1680,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         if str(args.get("method", "GET")).upper() not in ("GET", "HEAD", "OPTIONS"):
             audit_event("ha_api", {"method": args.get("method", "GET"), "endpoint": args["endpoint"]})
         return ha_request(args.get("method", "GET"), args["endpoint"], args.get("data"))
+    if name == "ha_ws_call":
+        return ha_ws_call(args["message"], int(args.get("timeout") or 30))
     if name == "supervisor_api":
         if str(args.get("method", "GET")).upper() not in ("GET", "HEAD", "OPTIONS"):
             audit_event("supervisor_api", {"method": args.get("method", "GET"), "endpoint": args["endpoint"]})
@@ -1630,6 +1754,18 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return diagnostic_bundle(args)
     if name == "list_automations":
         return list_automations()
+    if name == "list_automation_configs":
+        return list_domain_configs("automation", args)
+    if name == "get_automation_config":
+        return get_domain_config("automation", args)
+    if name == "list_script_configs":
+        return list_domain_configs("script", args)
+    if name == "get_script_config":
+        return get_domain_config("script", args)
+    if name == "list_scene_configs":
+        return list_domain_configs("scene", args)
+    if name == "get_scene_config":
+        return get_domain_config("scene", args)
     if name == "get_events":
         return ha_request("GET", "/events")
     if name == "get_services":
@@ -1763,6 +1899,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return restore_backup(args)
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "live_lovelace_get_config":
+        return live_lovelace_get_config(args)
+    if name == "live_lovelace_save_config":
+        return live_lovelace_save_config(args)
+    if name == "live_lovelace_resources":
+        return ha_ws_call({"type": "lovelace/resources"})
     if name == "list_lovelace_dashboards":
         return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "get_lovelace_dashboard_outline":
@@ -2047,6 +2189,81 @@ def diagnostic_bundle(args: dict[str, Any]) -> dict[str, Any]:
 
 def list_automations() -> dict[str, Any]:
     return list_entities({"domain": "automation", "detailed": True, "limit": 10000})
+
+
+def list_domain_configs(domain: str, args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 500)
+    states = ha_request("GET", "/states")
+    rows = []
+    for state in states:
+        entity_id = state.get("entity_id", "")
+        if not entity_id.startswith(f"{domain}."):
+            continue
+        attrs = state.get("attributes") or {}
+        row = {
+            "entity_id": entity_id,
+            "id": attrs.get("id") or entity_id.split(".", 1)[1],
+            "friendly_name": attrs.get("friendly_name"),
+            "state": state.get("state"),
+            "last_changed": state.get("last_changed"),
+        }
+        if query and query not in json.dumps(row, default=str).lower():
+            continue
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return {"domain": domain, "count": len(rows), "items": rows}
+
+
+def config_reference_files(domain: str) -> list[str]:
+    base = {
+        "automation": ["automations.yaml"],
+        "script": ["scripts.yaml"],
+        "scene": ["scenes.yaml"],
+    }.get(domain, [f"{domain}s.yaml"])
+    files = base[:]
+    packages = config_path("packages")
+    if packages.exists():
+        files.extend(str(path.relative_to(CONFIG_ROOT)) for path in packages.rglob("*.yaml"))
+        files.extend(str(path.relative_to(CONFIG_ROOT)) for path in packages.rglob("*.yml"))
+    return files
+
+
+def get_domain_config(domain: str, args: dict[str, Any]) -> dict[str, Any]:
+    identifier = args.get("id") or args.get("entity_id") or args.get("query")
+    if not identifier:
+        raise ValueError("Pass entity_id, id, or query")
+    identifier = str(identifier)
+    entity_id = identifier if identifier.startswith(f"{domain}.") else f"{domain}.{identifier}" if "." not in identifier else identifier
+    compact = list_domain_configs(domain, {"query": identifier, "limit": 20})
+    state = None
+    try:
+        state = ha_request("GET", f"/states/{entity_id}")
+    except Exception:
+        pass
+    needles = [identifier, entity_id, entity_id.split(".", 1)[-1]]
+    if state and isinstance(state, dict):
+        attrs = state.get("attributes") or {}
+        for key in ("id", "friendly_name"):
+            if attrs.get(key):
+                needles.append(str(attrs[key]))
+    contexts = []
+    context_lines = int(args.get("context_lines") or 20)
+    for rel_path in config_reference_files(domain):
+        path = config_path(rel_path)
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines, 1):
+            if any(needle and needle.lower() in line.lower() for needle in needles):
+                start = max(1, number - context_lines // 2)
+                contexts.append({"relative_path": rel_path, "match_line": number, "context": read_file_lines(path, start, context_lines)})
+                break
+    return {"domain": domain, "identifier": identifier, "entity_id": entity_id, "state": state, "matches": compact["items"], "source_contexts": contexts}
 
 
 def first_present(args: dict[str, Any], *names: str) -> Any:
@@ -3337,6 +3554,51 @@ def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str,
     return {"count": len(dashboards), "dashboards": dashboards}
 
 
+def lovelace_url_path(args: dict[str, Any]) -> str | None:
+    if args.get("url_path") is not None:
+        value = str(args["url_path"])
+        return value if value not in ("", "lovelace", "default") else None
+    if args.get("dashboard_id"):
+        registry, item = resolve_lovelace_dashboard({"id": args["dashboard_id"]})
+        if item:
+            value = str(item.get("url_path") or "")
+            return value if value not in ("", "lovelace", "default") else None
+    return None
+
+
+def live_lovelace_get_config(args: dict[str, Any]) -> dict[str, Any]:
+    message: dict[str, Any] = {"type": "lovelace/config"}
+    url_path = lovelace_url_path(args)
+    if url_path is not None:
+        message["url_path"] = url_path
+    return ha_ws_call(message)
+
+
+def live_lovelace_save_config(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("force")):
+        raise ValueError("live_lovelace_save_config requires force=true")
+    message: dict[str, Any] = {"type": "lovelace/config/save", "config": args["config"]}
+    url_path = lovelace_url_path(args)
+    if url_path is not None:
+        message["url_path"] = url_path
+    if bool(args.get("dry_run")):
+        return {"dry_run": True, "message": message, "preferred_path": True}
+    backups: dict[str, Any] = {}
+    if bool(args.get("backup", True)):
+        try:
+            registry, item = resolve_lovelace_dashboard({"url_path": args.get("url_path"), "id": args.get("dashboard_id")})
+            if item:
+                key = dashboard_item_key(item)
+                path = storage_path(key)
+                if path.exists():
+                    backups["dashboard"] = backup_path(path, key)
+        except Exception as err:
+            backups["error"] = str(err)
+    result = ha_ws_call(message)
+    audit_event("live_lovelace_save_config", {"url_path": url_path, "backups": backups, "success": result.get("success")})
+    return {"result": result, "backups": backups, "preferred_path": True}
+
+
 def load_storage_json(key: str) -> dict[str, Any]:
     path = storage_path(key)
     if not path.exists():
@@ -3688,13 +3950,13 @@ def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
         card.update(patch)
         after = json.loads(json.dumps(card, default=str))
     if bool(args.get("dry_run")):
-        return {"changed": False, "dry_run": True, "item": item, "key": key, "path": target_path, "before": before, "after": after, "current_hash": path_hash(storage_file)}
+        return {"changed": False, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "item": item, "key": key, "path": target_path, "before": before, "after": after, "current_hash": path_hash(storage_file)}
     backups: dict[str, Any] = {}
     if bool(args.get("backup", True)):
         backups["dashboard"] = backup_path(storage_path(key), args.get("label") or key)
     info = dump_storage_json(key, storage)
     audit_event("patch_lovelace_card", {"key": key, "path": target_path, "backups": backups})
-    return {"changed": True, "item": item, "key": key, "path": target_path, "before": before, "after": after, "dashboard": info, "backups": backups}
+    return {"changed": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "item": item, "key": key, "path": target_path, "before": before, "after": after, "dashboard": info, "backups": backups}
 
 
 def lovelace_save_mutation(args: dict[str, Any], key: str, storage: dict[str, Any], action: str, details: dict[str, Any]) -> dict[str, Any]:
@@ -3703,7 +3965,7 @@ def lovelace_save_mutation(args: dict[str, Any], key: str, storage: dict[str, An
         backups["dashboard"] = backup_path(storage_path(key), args.get("label") or key)
     info = dump_storage_json(key, storage)
     audit_event(action, {"key": key, "details": details, "backups": backups})
-    return {"dashboard": info, "backups": backups}
+    return {"warning": LOVELACE_STORAGE_EDIT_WARNING, "dashboard": info, "backups": backups}
 
 
 def get_lovelace_dashboard_outline(args: dict[str, Any]) -> dict[str, Any]:
@@ -3819,7 +4081,7 @@ def patch_lovelace_json_path(args: dict[str, Any]) -> dict[str, Any]:
         else:
             raise ValueError("Pass patch, replace, append, insert, remove=true, or remove_keys")
     if bool(args.get("dry_run")):
-        return {"changed": False, "dry_run": True, "item": item, "key": key, "path": path, "operation": operation, "before": before, "after": after, "current_hash": path_hash(storage_file)}
+        return {"changed": False, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "item": item, "key": key, "path": path, "operation": operation, "before": before, "after": after, "current_hash": path_hash(storage_file)}
     saved = lovelace_save_mutation(args, key, storage, "patch_lovelace_json_path", {"path": path, "operation": operation})
     return {"changed": True, "item": item, "key": key, "path": path, "operation": operation, "before": before, "after": after} | saved
 
@@ -3843,7 +4105,7 @@ def insert_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
     cards.insert(index, card)
     path = f"$.data.config.views[{view_index}].cards[{index}]"
     if bool(args.get("dry_run")):
-        return {"changed": False, "dry_run": True, "item": item, "key": key, "view_index": view_index, "index": index, "path": path, "before_count": before_count, "after_count": len(cards), "current_hash": path_hash(storage_file), "card": card}
+        return {"changed": False, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "item": item, "key": key, "view_index": view_index, "index": index, "path": path, "before_count": before_count, "after_count": len(cards), "current_hash": path_hash(storage_file), "card": card}
     saved = lovelace_save_mutation(args, key, storage, "insert_lovelace_card", {"view_index": view_index, "index": index, "path": path})
     return {"changed": True, "item": item, "key": key, "view_index": view_index, "index": index, "path": path, "before_count": before_count, "after_count": len(cards), "card": card} | saved
 
@@ -3870,7 +4132,7 @@ def delete_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
     require_expected_hash(storage_file, args.get("expected_hash"))
     before = json.loads(json.dumps(card, default=str))
     if bool(args.get("dry_run")):
-        return {"changed": False, "dry_run": True, "item": item, "key": key, "path": path, "card": before, "current_hash": path_hash(storage_file)}
+        return {"changed": False, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "item": item, "key": key, "path": path, "card": before, "current_hash": path_hash(storage_file)}
     removed = remove_value_at_path(storage, path)
     saved = lovelace_save_mutation(args, key, storage, "delete_lovelace_card", {"path": path})
     return {"changed": True, "item": item, "key": key, "path": path, "card": removed} | saved
@@ -3895,7 +4157,7 @@ def move_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("target_index is out of range")
     moving = json.loads(json.dumps(card, default=str))
     if bool(args.get("dry_run")):
-        return {"changed": False, "dry_run": True, "item": item, "key": key, "source_path": source_path, "target_view_index": target_view_index, "target_index": target_index, "card": moving, "current_hash": path_hash(storage_file)}
+        return {"changed": False, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "item": item, "key": key, "source_path": source_path, "target_view_index": target_view_index, "target_index": target_index, "card": moving, "current_hash": path_hash(storage_file)}
     source_parts = path_parts(source_path)
     if len(source_parts) >= 6 and source_parts[:3] == ["data", "config", "views"] and source_parts[4] == "cards":
         source_view_index = source_parts[3]
@@ -3923,7 +4185,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         path = lovelace_storage_path(args["key"])
         require_expected_hash(path, args.get("expected_hash"))
         if bool(args.get("dry_run")):
-            return {"key": args["key"], "path": str(path), "dry_run": True, "current_hash": path_hash(path), "would_backup": bool(path.exists() and args.get("backup", True))}
+            return {"key": args["key"], "path": str(path), "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "current_hash": path_hash(path), "would_backup": bool(path.exists() and args.get("backup", True))}
         backup = backup_path(path, args.get("label") or args["key"]) if bool(args.get("backup", True)) and path.exists() else None
         if "content" in args and args["content"] is not None:
             path.write_text(str(args["content"]))
@@ -3932,7 +4194,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         if args.get("mode"):
             path.chmod(int(str(args["mode"]), 8))
         audit_event("save_lovelace_dashboard_raw", {"key": args["key"], "path": str(path), "backup": backup})
-        return path_info(path) | {"key": args["key"], "backup": backup, "mode": "raw_storage_key"}
+        return path_info(path) | {"key": args["key"], "backup": backup, "mode": "raw_storage_key", "warning": LOVELACE_STORAGE_EDIT_WARNING}
 
     registry, item = resolve_lovelace_dashboard(args, allow_missing=bool(args.get("create", True)))
     if item is None:
@@ -3963,7 +4225,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         dashboard_storage = {"version": 1, "minor_version": 1, "key": key, "data": {"config": config}}
     dashboard_storage["key"] = key
     if bool(args.get("dry_run")):
-        return {"item": item, "key": key, "dry_run": True, "current_hash": path_hash(path), "would_backup": bool(args.get("backup", True)), "dashboard_storage": dashboard_storage}
+        return {"item": item, "key": key, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "current_hash": path_hash(path), "would_backup": bool(args.get("backup", True)), "dashboard_storage": dashboard_storage}
     backups: dict[str, Any] = {}
     if bool(args.get("backup", True)):
         if path.exists():
@@ -3974,7 +4236,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     dashboard_info = dump_storage_json(key, dashboard_storage, args.get("mode"))
     registry_info = dump_storage_json("lovelace_dashboards", registry)
     audit_event("save_lovelace_dashboard", {"key": key, "item": item, "backups": backups})
-    return {"item": item, "key": key, "dashboard": dashboard_info, "registry": registry_info, "backups": backups}
+    return {"item": item, "key": key, "warning": LOVELACE_STORAGE_EDIT_WARNING, "dashboard": dashboard_info, "registry": registry_info, "backups": backups}
 
 
 def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
@@ -3986,7 +4248,7 @@ def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
     key = dashboard_item_key(item)
     path = storage_path(key)
     if bool(args.get("dry_run")):
-        return {"item": item, "key": key, "path": str(path), "dry_run": True, "exists": path.exists()}
+        return {"item": item, "key": key, "path": str(path), "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "exists": path.exists()}
     backups: dict[str, Any] = {}
     if bool(args.get("backup", True)):
         if path.exists():
@@ -4001,7 +4263,7 @@ def delete_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
         path.unlink()
         deleted = True
     audit_event("delete_lovelace_dashboard", {"key": key, "item": item, "deleted_storage": deleted, "backups": backups})
-    return {"item": item, "key": key, "deleted_storage": deleted, "registry": registry_info, "backups": backups}
+    return {"item": item, "key": key, "warning": LOVELACE_STORAGE_EDIT_WARNING, "deleted_storage": deleted, "registry": registry_info, "backups": backups}
 
 
 def resource_text(uri: str, value: Any, mime_type: str = "application/json") -> dict[str, Any]:
@@ -4077,8 +4339,9 @@ def get_prompt(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         target = arguments.get("target") or "the requested card"
         text = (
             f"Patch {target} on {dashboard} safely. Use list_lovelace_dashboards, get_lovelace_view or "
-            "find_lovelace_cards/get_lovelace_card to locate exactly one card, then patch_lovelace_card with "
-            "expected_matches=1. Do not full-save a dashboard unless the targeted patch tools cannot express the change."
+            "find_lovelace_cards/get_lovelace_card to locate exactly one card. For actual UI/dashboard changes, prefer "
+            "live_lovelace_get_config/live_lovelace_save_config or the Home Assistant UI path, then verify the rendered UI. "
+            "Storage-backed Lovelace patch tools return a warning because they are not the preferred UI change path."
         )
     elif name == "config_safe_edit":
         path = arguments.get("path") or "the relevant config file"
