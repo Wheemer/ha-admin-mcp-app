@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.28"
+APP_VERSION = "0.1.29"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -37,7 +37,8 @@ READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "che
 DESTRUCTIVE_HINTS = ("delete", "remove", "restart", "stop", "write", "patch", "set", "save", "run", "shell", "control", "call", "fire", "manage")
 LOVELACE_STORAGE_EDIT_WARNING = (
     "Reminder: storage-backed Lovelace edits are not the preferred path for UI changes. "
-    "Use live_lovelace_get_config/live_lovelace_save_config or the Home Assistant UI path when changing dashboards, "
+    "Use live_lovelace_get_outline/live_lovelace_find_cards/live_lovelace_patch_card/live_lovelace_save_config "
+    "or the Home Assistant UI path when changing dashboards, "
     "then verify the rendered UI."
 )
 TEXT_EXTENSIONS = {
