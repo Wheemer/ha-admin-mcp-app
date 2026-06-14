@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.27"
+APP_VERSION = "0.1.28"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -3627,7 +3627,7 @@ def live_lovelace_get_outline(args: dict[str, Any]) -> dict[str, Any]:
             rows.append({"index": view_index, "view": view})
             continue
         cards = []
-        for row in iter_lovelace_cards(view, f"$.views[{view_index}]"):
+        for row in iter_live_lovelace_view_cards(view, view_index):
             card_row = {"path": row["path"], "type": row.get("type"), "title": row.get("title")}
             if bool(args.get("include_entities", True)):
                 card_row["entities"] = row.get("entities", [])
@@ -3655,12 +3655,19 @@ def live_lovelace_find_card_rows(config: dict[str, Any], args: dict[str, Any]) -
             continue
         if wanted_view_title and (not isinstance(view, dict) or str(view.get("title") or "") != wanted_view_title):
             continue
-        for row in iter_lovelace_cards(view, f"$.views[{view_index}]"):
+        for row in iter_live_lovelace_view_cards(view, view_index):
             if card_matches(row, args):
                 matches.append(row)
                 if len(matches) >= limit:
                     return matches
     return matches
+
+
+def iter_live_lovelace_view_cards(view: Any, view_index: int) -> list[dict[str, Any]]:
+    view_path = f"$.views[{view_index}]"
+    rows = iter_lovelace_cards(view, view_path)
+    section_container = re.compile(rf"^{re.escape(view_path)}\.sections\[\d+\]$")
+    return [row for row in rows if row["path"] != view_path and not section_container.match(row["path"])]
 
 
 def live_lovelace_get_card(args: dict[str, Any]) -> dict[str, Any]:
