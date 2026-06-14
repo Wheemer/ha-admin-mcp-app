@@ -1,7 +1,7 @@
 name: HA Admin MCP
 slug: ha_admin_mcp
 description: EXTREMELY DANGEROUS privileged MCP server for full Home Assistant administration
-version: 0.1.34
+version: 0.1.33
 url: https://github.com/Wheemer/ha-admin-mcp-app
 arch:
   - aarch64

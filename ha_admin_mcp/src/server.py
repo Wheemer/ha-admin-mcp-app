@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.34"
+APP_VERSION = "0.1.33"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -2351,9 +2351,7 @@ def get_automation_traces(args: dict[str, Any]) -> dict[str, Any]:
     listed = list_traces(trace_args)
     result = {"domain": "automation", "item_id": listed.get("item_id"), "entity_id": listed.get("entity_id"), "count": listed.get("count"), "traces": listed.get("traces", [])}
     run_id = args.get("run_id")
-    include_trace = args.get("include_trace")
-    should_include_trace = include_trace is not False
-    if not run_id and bool(args.get("latest") or should_include_trace) and result["traces"]:
+    if not run_id and bool(args.get("latest") or args.get("include_trace")) and result["traces"]:
         run_id = result["traces"][0].get("run_id")
     if run_id:
         result["trace"] = get_trace({"domain": "automation", "item_id": listed.get("item_id"), "run_id": run_id})
