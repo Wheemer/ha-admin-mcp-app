@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.24"
+APP_VERSION = "0.1.25"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -562,6 +562,17 @@ TOOLS = [
         ["domain"],
     ),
     tool_schema("system_overview", "Compatibility tool: compact overview of entities/domains/areas/system version", {}, []),
+    tool_schema(
+        "diagnostic_bundle",
+        "Return a compact HA operator bundle: identity, config check, reload readiness, errors, updates, and optional entity/dashboard context",
+        {
+            "entity_id": {"type": "string"},
+            "dashboard_id": {"type": "string"},
+            "dashboard_url_path": {"type": "string"},
+            "log_lines": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+        [],
+    ),
     tool_schema("list_automations", "Compatibility tool: list automation entities", {}, []),
     tool_schema(
         "get_events",
@@ -701,6 +712,66 @@ TOOLS = [
             "check_config": {"type": "boolean"},
         },
         ["path", "search", "replace"],
+    ),
+    tool_schema(
+        "ensure_config_block",
+        "Create, replace, or remove a marked text block in a /config file",
+        {
+            "path": {"type": "string"},
+            "name": {"type": "string"},
+            "content": {"type": "string"},
+            "remove": {"type": "boolean"},
+            "backup": {"type": "boolean"},
+            "label": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+            "check_config": {"type": "boolean"},
+        },
+        ["path", "name"],
+    ),
+    tool_schema("list_packages", "List YAML package files under /config/packages", {"recursive": {"type": "boolean"}}, []),
+    tool_schema(
+        "read_package",
+        "Read one package file under /config/packages",
+        {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
+        ["path"],
+    ),
+    tool_schema(
+        "write_package",
+        "Write one package file under /config/packages with backup, dry-run, expected_hash, and optional config check",
+        {"path": {"type": "string"}, "content": {"type": "string"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}, "check_config": {"type": "boolean"}},
+        ["path", "content"],
+    ),
+    tool_schema(
+        "patch_package_text",
+        "Guarded text or regex replacement in one /config/packages file",
+        {
+            "path": {"type": "string"},
+            "search": {"type": "string"},
+            "replace": {"type": "string"},
+            "regex": {"type": "boolean"},
+            "count": {"type": "integer", "minimum": 0},
+            "expected_count": {"type": "integer", "minimum": 0},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+            "check_config": {"type": "boolean"},
+        },
+        ["path", "search", "replace"],
+    ),
+    tool_schema("list_secrets", "List top-level secret names from /config/secrets.yaml without returning values", {}, []),
+    tool_schema("get_secret", "Read one top-level secret value from /config/secrets.yaml", {"name": {"type": "string"}}, ["name"]),
+    tool_schema(
+        "set_secret",
+        "Create or replace one top-level secret in /config/secrets.yaml",
+        {"name": {"type": "string"}, "value": {"type": "string"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}},
+        ["name", "value"],
+    ),
+    tool_schema(
+        "delete_secret",
+        "Delete one top-level secret from /config/secrets.yaml",
+        {"name": {"type": "string"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}, "force": {"type": "boolean"}},
+        ["name"],
     ),
     tool_schema(
         "tail_log",
@@ -852,6 +923,35 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "patch_entity_registry_entry",
+        "Patch one core.entity_registry entry by entity_id, unique_id, or id",
+        {
+            "entity_id": {"type": "string"},
+            "unique_id": {"type": "string"},
+            "id": {"type": "string"},
+            "patch": {"type": "object"},
+            "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        [],
+    ),
+    tool_schema(
+        "patch_device_registry_entry",
+        "Patch one core.device_registry entry by id or name",
+        {
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "patch": {"type": "object"},
+            "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        [],
+    ),
+    tool_schema(
         "sqlite_query",
         "Run a read-only SQLite query, defaulting to Home Assistant recorder DB",
         {
@@ -862,6 +962,45 @@ TOOLS = [
             "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
         },
         ["query"],
+    ),
+    tool_schema(
+        "recorder_purge",
+        "Call recorder.purge with keep_days/repack/apply_filter options",
+        {"keep_days": {"type": "integer", "minimum": 0}, "repack": {"type": "boolean"}, "apply_filter": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "recorder_purge_entities",
+        "Call recorder.purge_entities for specific entities/domains/globs",
+        {
+            "entity_id": {"type": "array", "items": {"type": "string"}},
+            "domains": {"type": "array", "items": {"type": "string"}},
+            "entity_globs": {"type": "array", "items": {"type": "string"}},
+            "keep_days": {"type": "integer", "minimum": 0},
+            "dry_run": {"type": "boolean"},
+        },
+        [],
+    ),
+    tool_schema("recorder_get_db_info", "Return recorder database file size, tables, and key row counts", {}, []),
+    tool_schema("list_backups", "List Home Assistant backups through Supervisor", {}, []),
+    tool_schema(
+        "create_backup",
+        "Create a full or partial Home Assistant backup through Supervisor",
+        {"name": {"type": "string"}, "password": {"type": "string"}, "folders": {"type": "array", "items": {"type": "string"}}, "addons": {"type": "array", "items": {"type": "string"}}, "homeassistant": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema("get_backup_info", "Return Supervisor metadata for one backup slug", {"slug": {"type": "string"}}, ["slug"]),
+    tool_schema(
+        "delete_backup",
+        "Delete one Home Assistant backup by slug",
+        {"slug": {"type": "string"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
+        ["slug"],
+    ),
+    tool_schema(
+        "restore_backup",
+        "Restore one Home Assistant backup by slug; this is intentionally force-gated",
+        {"slug": {"type": "string"}, "password": {"type": "string"}, "partial": {"type": "boolean"}, "folders": {"type": "array", "items": {"type": "string"}}, "addons": {"type": "array", "items": {"type": "string"}}, "homeassistant": {"type": "boolean"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
+        ["slug"],
     ),
     tool_schema(
         "read_lovelace_dashboards",
@@ -1487,6 +1626,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return domain_summary(args["domain"], int(args.get("example_limit") or 3))
     if name == "system_overview":
         return system_overview()
+    if name == "diagnostic_bundle":
+        return diagnostic_bundle(args)
     if name == "list_automations":
         return list_automations()
     if name == "get_events":
@@ -1539,6 +1680,31 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_files(search_args)
     if name == "patch_config_text":
         return patch_config_text(args)
+    if name == "ensure_config_block":
+        return ensure_config_block(args)
+    if name == "list_packages":
+        return list_packages(bool(args.get("recursive")))
+    if name == "read_package":
+        package_args = dict(args)
+        package_args["path"] = str(Path("packages") / package_args["path"])
+        content, truncated = read_limited(config_path(package_args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
+        return {"path": str(config_path(package_args["path"])), "relative_path": package_args["path"], "content": content, "truncated": truncated}
+    if name == "write_package":
+        package_args = dict(args)
+        package_args["path"] = str(Path("packages") / package_args["path"])
+        return write_config_file(package_args)
+    if name == "patch_package_text":
+        package_args = dict(args)
+        package_args["path"] = str(Path("packages") / package_args["path"])
+        return patch_config_text(package_args)
+    if name == "list_secrets":
+        return list_secrets()
+    if name == "get_secret":
+        return get_secret(args["name"])
+    if name == "set_secret":
+        return set_secret(args)
+    if name == "delete_secret":
+        return delete_secret(args)
     if name == "tail_log":
         return tail_log(args)
     if name == "list_storage_keys":
@@ -1573,8 +1739,28 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_named_registry("core.floor_registry", "floors", args)
     if name == "search_label_registry":
         return search_named_registry("core.label_registry", "labels", args)
+    if name == "patch_entity_registry_entry":
+        return patch_registry_entry("core.entity_registry", "entities", args, ["entity_id", "unique_id", "id"])
+    if name == "patch_device_registry_entry":
+        return patch_registry_entry("core.device_registry", "devices", args, ["id", "name", "name_by_user"])
     if name == "sqlite_query":
         return sqlite_query(args)
+    if name == "recorder_purge":
+        return recorder_purge(args)
+    if name == "recorder_purge_entities":
+        return recorder_purge_entities(args)
+    if name == "recorder_get_db_info":
+        return recorder_get_db_info()
+    if name == "list_backups":
+        return supervisor_request("GET", "/backups")
+    if name == "create_backup":
+        return create_backup(args)
+    if name == "get_backup_info":
+        return supervisor_request("GET", f"/backups/{args['slug']}/info")
+    if name == "delete_backup":
+        return delete_backup(args)
+    if name == "restore_backup":
+        return restore_backup(args)
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "list_lovelace_dashboards":
@@ -1830,6 +2016,33 @@ def system_overview() -> dict[str, Any]:
         "areas": dict(sorted(areas.items())),
         "core": supervisor_request("GET", "/core/info"),
     }
+
+
+def diagnostic_bundle(args: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "target": get_target_identity(),
+        "overview": system_overview(),
+        "reload_readiness": check_reload_readiness(),
+        "errors": get_error_log({"level": "ERROR", "lines": int(args.get("log_lines") or 80)}),
+    }
+    try:
+        result["updates"] = ha_request("GET", "/states/update")
+    except Exception as err:
+        result["updates_error"] = str(err)
+    if args.get("entity_id"):
+        result["entity"] = get_entity({"entity_id": args["entity_id"], "detailed": True})
+        try:
+            result["entity_registry"] = get_entity_registry_entry({"entity_id": args["entity_id"]})
+        except Exception as err:
+            result["entity_registry_error"] = str(err)
+    dashboard_args: dict[str, Any] = {}
+    if args.get("dashboard_id"):
+        dashboard_args["id"] = args["dashboard_id"]
+    if args.get("dashboard_url_path"):
+        dashboard_args["url_path"] = args["dashboard_url_path"]
+    if dashboard_args:
+        result["dashboard_outline"] = get_lovelace_dashboard_outline(dashboard_args)
+    return result
 
 
 def list_automations() -> dict[str, Any]:
@@ -2285,6 +2498,151 @@ def patch_config_text(args: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def ensure_config_block(args: dict[str, Any]) -> dict[str, Any]:
+    path = config_path(args["path"])
+    require_expected_hash(path, args.get("expected_hash"))
+    name = str(args["name"])
+    start = f"# BEGIN HA-ADMIN-MCP {name}"
+    end = f"# END HA-ADMIN-MCP {name}"
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+    pattern = re.compile(rf"(?ms)^# BEGIN HA-ADMIN-MCP {re.escape(name)}\n.*?^# END HA-ADMIN-MCP {re.escape(name)}\n?")
+    block = "" if bool(args.get("remove")) else f"{start}\n{str(args.get('content') or '').rstrip()}\n{end}\n"
+    matches = list(pattern.finditer(text))
+    if matches:
+        after = pattern.sub(block, text, count=1)
+        action = "removed" if args.get("remove") else "replaced"
+    elif args.get("remove"):
+        after = text
+        action = "missing"
+    else:
+        separator = "" if not text or text.endswith("\n") else "\n"
+        after = text + separator + block
+        action = "added"
+    result = {
+        "path": str(path),
+        "relative_path": args["path"],
+        "name": name,
+        "action": action,
+        "dry_run": bool(args.get("dry_run")),
+        "before_hash": path_hash(path),
+        "after_hash": hashlib.sha256(after.encode()).hexdigest(),
+    }
+    if bool(args.get("dry_run")):
+        return result
+    backup = backup_path(path, args.get("label") or args["path"]) if path.exists() and bool(args.get("backup", True)) else None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(after, encoding="utf-8")
+    result["backup"] = backup
+    if bool(args.get("check_config", False)):
+        result["check_config"] = run_config_check()
+    audit_event("ensure_config_block", {"path": str(path), "name": name, "action": action, "backup": backup})
+    return result
+
+
+def package_path(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        raise ValueError("Package paths must be relative to /config/packages")
+    root = config_path("packages")
+    target = (root / candidate).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("Package path escapes /config/packages")
+    return target
+
+
+def list_packages(recursive: bool) -> dict[str, Any]:
+    root = config_path("packages")
+    if not root.exists():
+        return {"root": str(root), "count": 0, "packages": []}
+    iterator = root.rglob("*") if recursive else root.glob("*")
+    rows = []
+    for path in iterator:
+        if path.is_file() and path.suffix.lower() in (".yaml", ".yml"):
+            rows.append(path_info(path) | {"package_path": str(path.relative_to(root))})
+    return {"root": str(root), "count": len(rows), "packages": rows}
+
+
+def secret_path() -> Path:
+    return config_path("secrets.yaml")
+
+
+def parse_secret_lines() -> tuple[Path, list[str]]:
+    path = secret_path()
+    if not path.exists():
+        return path, []
+    return path, path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+
+def secret_line_pattern(name: str) -> re.Pattern[str]:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError("Secret names may contain only letters, numbers, dot, underscore, and dash")
+    return re.compile(rf"^({re.escape(name)}\s*:\s*)(.*)$")
+
+
+def list_secrets() -> dict[str, Any]:
+    path, lines = parse_secret_lines()
+    names = []
+    for line in lines:
+        match = re.match(r"^([A-Za-z0-9_.-]+)\s*:", line)
+        if match:
+            names.append(match.group(1))
+    return {"path": str(path), "count": len(names), "secrets": sorted(names)}
+
+
+def get_secret(name: str) -> dict[str, Any]:
+    path, lines = parse_secret_lines()
+    pattern = secret_line_pattern(name)
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            return {"path": str(path), "name": name, "value": match.group(2).strip()}
+    raise ValueError(f"Secret not found: {name}")
+
+
+def set_secret(args: dict[str, Any]) -> dict[str, Any]:
+    path, lines = parse_secret_lines()
+    require_expected_hash(path, args.get("expected_hash"))
+    name = str(args["name"])
+    value = str(args["value"])
+    pattern = secret_line_pattern(name)
+    changed = False
+    after_lines = []
+    for line in lines:
+        if pattern.match(line):
+            after_lines.append(f"{name}: {value}")
+            changed = True
+        else:
+            after_lines.append(line)
+    if not changed:
+        after_lines.append(f"{name}: {value}")
+    after = "\n".join(after_lines).rstrip() + "\n"
+    result = {"path": str(path), "name": name, "action": "updated" if changed else "created", "dry_run": bool(args.get("dry_run")), "current_hash": path_hash(path)}
+    if bool(args.get("dry_run")):
+        return result
+    backup = backup_path(path, "secrets.yaml") if path.exists() and bool(args.get("backup", True)) else None
+    path.write_text(after, encoding="utf-8")
+    audit_event("set_secret", {"name": name, "backup": backup})
+    return result | {"backup": backup}
+
+
+def delete_secret(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("force")):
+        raise ValueError("delete_secret requires force=true")
+    path, lines = parse_secret_lines()
+    require_expected_hash(path, args.get("expected_hash"))
+    name = str(args["name"])
+    pattern = secret_line_pattern(name)
+    after_lines = [line for line in lines if not pattern.match(line)]
+    removed = len(after_lines) != len(lines)
+    result = {"path": str(path), "name": name, "removed": removed, "dry_run": bool(args.get("dry_run")), "current_hash": path_hash(path)}
+    if bool(args.get("dry_run")):
+        return result
+    backup = backup_path(path, "secrets.yaml") if path.exists() and bool(args.get("backup", True)) else None
+    path.write_text(("\n".join(after_lines).rstrip() + "\n") if after_lines else "", encoding="utf-8")
+    audit_event("delete_secret", {"name": name, "removed": removed, "backup": backup})
+    return result | {"backup": backup}
+
+
 def tail_log(args: dict[str, Any]) -> dict[str, Any]:
     explicit_path = bool(args.get("path"))
     raw_path = args.get("path") or "/config/home-assistant.log"
@@ -2657,6 +3015,38 @@ def get_entity_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("Entity registry entry not found")
 
 
+def patch_registry_entry(registry_key: str, list_name: str, args: dict[str, Any], selectors: list[str]) -> dict[str, Any]:
+    path = storage_path(registry_key)
+    require_expected_hash(path, args.get("expected_hash"))
+    data = load_storage_json(registry_key)
+    rows = data.get("data", {}).get(list_name, [])
+    matches = []
+    for index, row in enumerate(rows):
+        for selector in selectors:
+            wanted = args.get(selector)
+            if wanted is not None and str(row.get(selector) or "") == str(wanted):
+                matches.append((index, row))
+                break
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one {registry_key} match, found {len(matches)}")
+    index, row = matches[0]
+    before = json.loads(json.dumps(row, default=str))
+    for key_name in args.get("remove_keys") or []:
+        row.pop(str(key_name), None)
+    patch = args.get("patch") or {}
+    if patch:
+        if not isinstance(patch, dict):
+            raise ValueError("patch must be an object")
+        row.update(patch)
+    after = json.loads(json.dumps(row, default=str))
+    if bool(args.get("dry_run")):
+        return {"key": registry_key, "list": list_name, "index": index, "dry_run": True, "before": before, "after": after, "current_hash": path_hash(path)}
+    backup = backup_path(path, args.get("label") or registry_key) if bool(args.get("backup", True)) else None
+    info = dump_storage_json(registry_key, data)
+    audit_event("patch_registry_entry", {"key": registry_key, "index": index, "backup": backup})
+    return {"key": registry_key, "list": list_name, "index": index, "before": before, "after": after, "backup": backup, "storage": info}
+
+
 def search_device_registry(args: dict[str, Any]) -> dict[str, Any]:
     data = load_storage_json("core.device_registry")
     rows = data.get("data", {}).get("devices", [])
@@ -2736,6 +3126,77 @@ def sqlite_query(args: dict[str, Any]) -> dict[str, Any]:
             if len(rows) >= limit:
                 break
     return {"path": str(path), "columns": columns, "rows": rows, "count": len(rows), "limit": limit, "elapsed_seconds": round(time.time() - start, 3)}
+
+
+def recorder_get_db_info() -> dict[str, Any]:
+    path = Path("/config/home-assistant_v2.db")
+    info: dict[str, Any] = {"path": str(path), "exists": path.exists()}
+    if not path.exists():
+        return info
+    info.update(path_info(path))
+    tables = sqlite_query({"path": str(path), "query": "select name from sqlite_master where type='table' order by name", "limit": 500})["rows"]
+    table_names = [row["name"] for row in tables]
+    counts: dict[str, Any] = {}
+    for table in ("states", "states_meta", "events", "event_types", "statistics", "statistics_short_term", "statistics_meta"):
+        if table in table_names:
+            try:
+                counts[table] = sqlite_query({"path": str(path), "query": f"select count(*) as count from {table}", "limit": 1})["rows"][0]["count"]
+            except Exception as err:
+                counts[table] = {"error": str(err)}
+    info["tables"] = table_names
+    info["counts"] = counts
+    return info
+
+
+def recorder_purge(args: dict[str, Any]) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for key in ("keep_days", "repack", "apply_filter"):
+        if args.get(key) is not None:
+            data[key] = args[key]
+    if bool(args.get("dry_run")):
+        return {"service": "recorder.purge", "data": data, "dry_run": True}
+    audit_event("recorder_purge", data)
+    return ha_request("POST", "/services/recorder/purge", data)
+
+
+def recorder_purge_entities(args: dict[str, Any]) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for key in ("entity_id", "domains", "entity_globs", "keep_days"):
+        if args.get(key) is not None:
+            data[key] = args[key]
+    if bool(args.get("dry_run")):
+        return {"service": "recorder.purge_entities", "data": data, "dry_run": True}
+    audit_event("recorder_purge_entities", data)
+    return ha_request("POST", "/services/recorder/purge_entities", data)
+
+
+def create_backup(args: dict[str, Any]) -> Any:
+    data = {key: args[key] for key in ("name", "password", "folders", "addons", "homeassistant") if args.get(key) is not None}
+    endpoint = "/backups/new/partial" if any(key in data for key in ("folders", "addons", "homeassistant")) else "/backups/new/full"
+    audit_event("create_backup", {"endpoint": endpoint, "name": args.get("name")})
+    return supervisor_request("POST", endpoint, data)
+
+
+def delete_backup(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("force")):
+        raise ValueError("delete_backup requires force=true")
+    if bool(args.get("dry_run")):
+        return {"slug": args["slug"], "dry_run": True, "would_delete": True}
+    result = supervisor_request("POST", f"/backups/{args['slug']}/remove")
+    audit_event("delete_backup", {"slug": args["slug"], "result": result})
+    return {"slug": args["slug"], "deleted": True, "result": result}
+
+
+def restore_backup(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("force")):
+        raise ValueError("restore_backup requires force=true")
+    data = {key: args[key] for key in ("password", "folders", "addons", "homeassistant") if args.get(key) is not None}
+    endpoint = f"/backups/{args['slug']}/restore/partial" if bool(args.get("partial")) else f"/backups/{args['slug']}/restore/full"
+    if bool(args.get("dry_run")):
+        return {"slug": args["slug"], "endpoint": endpoint, "data": data, "dry_run": True}
+    result = supervisor_request("POST", endpoint, data)
+    audit_event("restore_backup", {"slug": args["slug"], "endpoint": endpoint, "result": result})
+    return {"slug": args["slug"], "endpoint": endpoint, "restored": True, "result": result}
 
 
 def parse_time(value: str | None) -> datetime:
