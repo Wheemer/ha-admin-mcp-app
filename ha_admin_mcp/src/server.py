@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.31"
+APP_VERSION = "0.1.32"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -2341,7 +2341,19 @@ def get_automation_traces(args: dict[str, Any]) -> dict[str, Any]:
     if not identifier:
         raise ValueError("Pass entity_id or id")
     automation_id = str(identifier).removeprefix("automation.")
-    return {"automation_id": automation_id, "traces": ha_request("GET", f"/config/automation/trace/{automation_id}")}
+    entity_id = str(args.get("entity_id") or "")
+    if entity_id:
+        try:
+            state = ha_request("GET", f"/states/{entity_id}")
+            attrs = state.get("attributes") or {}
+            automation_id = str(attrs.get("id") or automation_id)
+        except Exception:
+            pass
+    try:
+        traces = ha_request("GET", f"/config/automation/trace/{automation_id}")
+        return {"automation_id": automation_id, "entity_id": entity_id or None, "success": True, "traces": traces}
+    except Exception as err:
+        return {"automation_id": automation_id, "entity_id": entity_id or None, "success": False, "error": str(err)}
 
 
 def yaml_config_files(include_blueprints: bool = False) -> list[Path]:
