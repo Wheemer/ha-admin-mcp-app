@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.29"
+APP_VERSION = "0.1.30"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -684,6 +684,13 @@ TOOLS = [
     tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("list_scene_configs", "List scene entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_scene_config", "Get compact scene config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("active_config_index", "Return a compact index of the active /config tree, packages, blueprints, templates, and key YAML files", {"limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("search_active_config", "Search active /config YAML, package, template, and blueprint files with /config or relative paths accepted", {"query": {"type": "string"}, "path": {"type": "string"}, "filename": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
+    tool_schema("list_template_configs", "Find template configuration blocks in templates.yaml, configuration.yaml, and package YAML", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("get_template_config", "Get template source context by entity_id, unique text, or query", {"entity_id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("list_blueprints", "List blueprint YAML files under /config/blueprints", {"domain": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("read_blueprint", "Read one blueprint YAML file by relative path or domain/name", {"path": {"type": "string"}, "domain": {"type": "string"}, "name": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}}, []),
+    tool_schema("search_blueprints", "Search blueprint YAML files under /config/blueprints", {"query": {"type": "string"}, "domain": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
     tool_schema(
         "get_events",
         "Return Home Assistant event names",
@@ -1791,6 +1798,20 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_domain_configs("scene", args)
     if name == "get_scene_config":
         return get_domain_config("scene", args)
+    if name == "active_config_index":
+        return active_config_index(args)
+    if name == "search_active_config":
+        return search_active_config(args)
+    if name == "list_template_configs":
+        return list_template_configs(args)
+    if name == "get_template_config":
+        return get_template_config(args)
+    if name == "list_blueprints":
+        return list_blueprints(args)
+    if name == "read_blueprint":
+        return read_blueprint(args)
+    if name == "search_blueprints":
+        return search_blueprints(args)
     if name == "get_events":
         return ha_request("GET", "/events")
     if name == "get_services":
@@ -2254,6 +2275,7 @@ def config_reference_files(domain: str) -> list[str]:
         "automation": ["automations.yaml"],
         "script": ["scripts.yaml"],
         "scene": ["scenes.yaml"],
+        "template": ["templates.yaml", "configuration.yaml"],
     }.get(domain, [f"{domain}s.yaml"])
     files = base[:]
     packages = config_path("packages")
@@ -2297,6 +2319,185 @@ def get_domain_config(domain: str, args: dict[str, Any]) -> dict[str, Any]:
                 contexts.append({"relative_path": rel_path, "match_line": number, "context": read_file_lines(path, start, context_lines)})
                 break
     return {"domain": domain, "identifier": identifier, "entity_id": entity_id, "state": state, "matches": compact["items"], "source_contexts": contexts}
+
+
+def yaml_config_files(include_blueprints: bool = False) -> list[Path]:
+    roots = [CONFIG_ROOT]
+    packages = config_path("packages")
+    if packages.exists():
+        roots.append(packages)
+    if include_blueprints:
+        blueprints = config_path("blueprints")
+        if blueprints.exists():
+            roots.append(blueprints)
+    seen: set[Path] = set()
+    files: list[Path] = []
+    for root in roots:
+        if root.is_file():
+            candidates = [root]
+        else:
+            candidates = list(root.rglob("*.yaml")) + list(root.rglob("*.yml"))
+        for path in candidates:
+            resolved = path.resolve()
+            if resolved in seen or not path.is_file():
+                continue
+            try:
+                path.relative_to(CONFIG_ROOT)
+            except ValueError:
+                continue
+            seen.add(resolved)
+            files.append(path)
+    return sorted(files, key=lambda item: str(item.relative_to(CONFIG_ROOT)))
+
+
+def active_config_index(args: dict[str, Any]) -> dict[str, Any]:
+    limit = int(args.get("limit") or 1000)
+    yaml_files = yaml_config_files(include_blueprints=True)
+    key_files = []
+    for rel in ("configuration.yaml", "automations.yaml", "scripts.yaml", "scenes.yaml", "templates.yaml", "secrets.yaml"):
+        path = config_path(rel)
+        if path.exists():
+            key_files.append(path_info(path) | {"relative_path": rel})
+    packages = [path_info(path) | {"relative_path": str(path.relative_to(CONFIG_ROOT))} for path in yaml_config_files() if "packages" in path.relative_to(CONFIG_ROOT).parts]
+    blueprints = list_blueprints({"limit": limit})
+    template_hits = list_template_configs({"limit": 50, "context_lines": 3})
+    return {
+        "config_root": str(CONFIG_ROOT),
+        "key_files": key_files,
+        "yaml_file_count": len(yaml_files),
+        "yaml_files": [str(path.relative_to(CONFIG_ROOT)) for path in yaml_files[:limit]],
+        "packages": packages[:limit],
+        "blueprints": blueprints,
+        "template_sources": template_hits,
+    }
+
+
+def search_active_config(args: dict[str, Any]) -> dict[str, Any]:
+    root = config_path(args.get("path") or ".")
+    search_args = {
+        "path": str(root),
+        "query": args.get("query"),
+        "filename": args.get("filename"),
+        "recursive": True,
+        "limit": int(args.get("limit") or 100),
+        "max_file_bytes": args.get("max_file_bytes") or 5_000_000,
+    }
+    matches = search_files(search_args)
+    context_lines = int(args.get("context_lines") or 0)
+    if context_lines > 0:
+        for match in matches:
+            if "line" in match and match.get("path"):
+                match["context"] = read_file_lines(Path(match["path"]), max(1, int(match["line"]) - context_lines // 2), context_lines)
+                try:
+                    match["relative_path"] = str(Path(match["path"]).resolve().relative_to(CONFIG_ROOT))
+                except ValueError:
+                    pass
+    return {"root": str(root), "query": args.get("query"), "count": len(matches), "matches": matches}
+
+
+def template_source_files() -> list[Path]:
+    files: list[Path] = []
+    for rel_path in config_reference_files("template"):
+        path = config_path(rel_path)
+        if path.exists() and path.is_file():
+            files.append(path)
+    for path in yaml_config_files():
+        if "packages" in path.relative_to(CONFIG_ROOT).parts and path not in files:
+            files.append(path)
+    return files
+
+
+def list_template_configs(args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 100)
+    context_lines = int(args.get("context_lines") or 20)
+    matches: list[dict[str, Any]] = []
+    for path in template_source_files():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as err:
+            matches.append({"relative_path": str(path.relative_to(CONFIG_ROOT)), "error": str(err)})
+            continue
+        for number, line in enumerate(lines, 1):
+            line_l = line.lower()
+            if "template:" not in line_l and query and query not in line_l:
+                continue
+            if query and query not in "\n".join(lines[max(0, number - context_lines): min(len(lines), number + context_lines)]).lower():
+                continue
+            matches.append({"relative_path": str(path.relative_to(CONFIG_ROOT)), "match_line": number, "text": line[:500], "context": read_file_lines(path, max(1, number - context_lines // 2), context_lines)})
+            if len(matches) >= limit:
+                return {"count": len(matches), "matches": matches}
+            if not query:
+                break
+    return {"count": len(matches), "matches": matches}
+
+
+def get_template_config(args: dict[str, Any]) -> dict[str, Any]:
+    query = args.get("query") or args.get("entity_id")
+    if not query:
+        raise ValueError("Pass entity_id or query")
+    result = list_template_configs({"query": str(query), "limit": int(args.get("limit") or 20), "context_lines": int(args.get("context_lines") or 60)})
+    result["query"] = query
+    return result
+
+
+def blueprint_root() -> Path:
+    return config_path("blueprints")
+
+
+def list_blueprints(args: dict[str, Any]) -> dict[str, Any]:
+    root = blueprint_root()
+    domain = str(args.get("domain") or "").strip("/")
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 500)
+    search_root = root / domain if domain else root
+    rows = []
+    if not search_root.exists():
+        return {"root": str(search_root), "count": 0, "blueprints": []}
+    for path in sorted(list(search_root.rglob("*.yaml")) + list(search_root.rglob("*.yml")), key=str):
+        if len(rows) >= limit:
+            break
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            rel = str(path.relative_to(CONFIG_ROOT))
+        except OSError as err:
+            rows.append({"path": str(path), "error": str(err)})
+            continue
+        if query and query not in rel.lower() and query not in text.lower():
+            continue
+        rows.append(path_info(path) | {"relative_path": rel, "domain": path.relative_to(root).parts[0] if len(path.relative_to(root).parts) > 1 else None})
+    return {"root": str(search_root), "count": len(rows), "blueprints": rows}
+
+
+def resolve_blueprint_path(args: dict[str, Any]) -> Path:
+    if args.get("path"):
+        path_text = str(args["path"])
+        if path_text.startswith("blueprints/"):
+            return config_path(path_text)
+        return config_path(str(Path("blueprints") / path_text))
+    domain = args.get("domain")
+    name = args.get("name")
+    if not domain or not name:
+        raise ValueError("Pass path or domain and name")
+    candidates = list_blueprints({"domain": domain, "query": name, "limit": 20})["blueprints"]
+    if len(candidates) != 1:
+        raise ValueError(f"Expected exactly one blueprint match, found {len(candidates)}")
+    return config_path(candidates[0]["relative_path"])
+
+
+def read_blueprint(args: dict[str, Any]) -> dict[str, Any]:
+    path = resolve_blueprint_path(args)
+    content, truncated = read_limited(path, int(args.get("max_bytes") or MAX_READ_BYTES))
+    return {"path": str(path), "relative_path": str(path.relative_to(CONFIG_ROOT)), "content": content, "truncated": truncated}
+
+
+def search_blueprints(args: dict[str, Any]) -> dict[str, Any]:
+    root = blueprint_root()
+    if args.get("domain"):
+        root = root / str(args["domain"]).strip("/")
+    result = search_active_config({"path": str(root.relative_to(CONFIG_ROOT)), "query": args["query"], "filename": "*.y*ml", "limit": int(args.get("limit") or 100), "context_lines": int(args.get("context_lines") or 10)})
+    result["blueprint_root"] = str(root)
+    return result
 
 
 def first_present(args: dict[str, Any], *names: str) -> Any:
@@ -2625,7 +2826,9 @@ def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
         if len(matches) >= limit:
             break
         try:
-            if filename and fnmatch.fnmatch(path.name, filename):
+            if filename and not fnmatch.fnmatch(path.name, filename):
+                continue
+            if filename and not query:
                 matches.append({"path": str(path), "match": "filename"})
                 continue
             if not query or not path.is_file() or path.stat().st_size > max_file_bytes:
@@ -2658,9 +2861,12 @@ def config_path(path: str) -> Path:
     if not path or path == ".":
         return CONFIG_ROOT.resolve()
     candidate = Path(path)
-    if candidate.is_absolute():
-        raise ValueError("Config file paths must be relative to /config")
     root = CONFIG_ROOT.resolve()
+    if candidate.is_absolute():
+        target = candidate.resolve()
+        if target == root or root in target.parents:
+            return target
+        raise ValueError("Absolute config paths must stay under /config")
     target = (CONFIG_ROOT / candidate).resolve()
     if target != root and root not in target.parents:
         raise ValueError("Config path escapes /config")
