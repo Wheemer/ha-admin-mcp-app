@@ -27,7 +27,7 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 ## Main Tool Groups
 
 - Shell and host control: `run_command`, `run_shell`, `ha_cli`, `get_environment`, `batch_call_tools`
-- Upstream compatibility and discovery: `get_version`, `search_tools`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `diagnostic_bundle`, `list_automations`, `get_automation_traces`
+- Upstream compatibility and discovery: `get_version`, `search_tools`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `diagnostic_bundle`, `list_automations`, `list_traces`, `get_trace`, `list_trace_contexts`, `get_automation_traces`
 - `homeassistant-ai/ha-mcp` compatibility shims: the upstream `ha_*` tool names are exposed and routed through this app's full-access primitives where a direct equivalent exists.
 - Filesystem control: `stat_path`, `list_dir`, `read_file`, `read_file_window`, `read_file_lines`, `read_file_base64`, `write_file`, `write_file_base64`, `delete_path`, `search_files`, `glob_paths`, `hash_file`
 - Home Assistant APIs: `ha_api`, `supervisor_api`, `http_request`, `call_service`, `get_states`, `get_events`, `get_services`, `get_history`, `render_template`, `fire_event`

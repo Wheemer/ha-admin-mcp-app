@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.32"
+APP_VERSION = "0.1.33"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -684,7 +684,10 @@ TOOLS = [
     tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("list_scene_configs", "List scene entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_scene_config", "Get compact scene config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
-    tool_schema("get_automation_traces", "Read Home Assistant automation trace data by automation entity_id or id", {"entity_id": {"type": "string"}, "id": {"type": "string"}}, []),
+    tool_schema("list_traces", "List Home Assistant automation or script traces through the live WebSocket trace/list API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, ["domain"]),
+    tool_schema("get_trace", "Read one Home Assistant automation or script trace by run_id through the live WebSocket trace/get API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "run_id": {"type": "string"}, "latest": {"type": "boolean"}}, ["domain"]),
+    tool_schema("list_trace_contexts", "List Home Assistant automation or script trace contexts through the live WebSocket trace/contexts API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}}, ["domain"]),
+    tool_schema("get_automation_traces", "List automation traces and optionally fetch a specific or latest run", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "run_id": {"type": "string"}, "latest": {"type": "boolean"}, "include_trace": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("active_config_index", "Return a compact index of the active /config tree, packages, blueprints, templates, and key YAML files", {"limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("search_active_config", "Search active /config YAML, package, template, and blueprint files with /config or relative paths accepted", {"query": {"type": "string"}, "path": {"type": "string"}, "filename": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
     tool_schema("list_template_configs", "Find template configuration blocks in templates.yaml, configuration.yaml, and package YAML", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
@@ -1803,6 +1806,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_domain_configs("scene", args)
     if name == "get_scene_config":
         return get_domain_config("scene", args)
+    if name == "list_traces":
+        return list_traces(args)
+    if name == "get_trace":
+        return get_trace(args)
+    if name == "list_trace_contexts":
+        return list_trace_contexts(args)
     if name == "get_automation_traces":
         return get_automation_traces(args)
     if name == "active_config_index":
@@ -2337,23 +2346,76 @@ def get_domain_config(domain: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_automation_traces(args: dict[str, Any]) -> dict[str, Any]:
-    identifier = args.get("id") or args.get("entity_id")
+    trace_args = dict(args)
+    trace_args["domain"] = "automation"
+    listed = list_traces(trace_args)
+    result = {"domain": "automation", "item_id": listed.get("item_id"), "entity_id": listed.get("entity_id"), "count": listed.get("count"), "traces": listed.get("traces", [])}
+    run_id = args.get("run_id")
+    if not run_id and bool(args.get("latest") or args.get("include_trace")) and result["traces"]:
+        run_id = result["traces"][0].get("run_id")
+    if run_id:
+        result["trace"] = get_trace({"domain": "automation", "item_id": listed.get("item_id"), "run_id": run_id})
+    return result
+
+
+def trace_item_id(domain: str, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    identifier = args.get("item_id") or args.get("id") or args.get("entity_id")
     if not identifier:
-        raise ValueError("Pass entity_id or id")
-    automation_id = str(identifier).removeprefix("automation.")
-    entity_id = str(args.get("entity_id") or "")
+        return None, None
+    text = str(identifier)
+    entity_id = text if text.startswith(f"{domain}.") else args.get("entity_id")
+    item_id = text.removeprefix(f"{domain}.")
     if entity_id:
         try:
             state = ha_request("GET", f"/states/{entity_id}")
             attrs = state.get("attributes") or {}
-            automation_id = str(attrs.get("id") or automation_id)
+            item_id = str(attrs.get("id") or item_id)
         except Exception:
             pass
-    try:
-        traces = ha_request("GET", f"/config/automation/trace/{automation_id}")
-        return {"automation_id": automation_id, "entity_id": entity_id or None, "success": True, "traces": traces}
-    except Exception as err:
-        return {"automation_id": automation_id, "entity_id": entity_id or None, "success": False, "error": str(err)}
+    return item_id, str(entity_id) if entity_id else None
+
+
+def list_traces(args: dict[str, Any]) -> dict[str, Any]:
+    domain = str(args["domain"])
+    item_id, entity_id = trace_item_id(domain, args)
+    message: dict[str, Any] = {"type": "trace/list", "domain": domain}
+    if item_id:
+        message["item_id"] = item_id
+    response = ha_ws_call(message)
+    if not response.get("success"):
+        return {"domain": domain, "item_id": item_id, "entity_id": entity_id, "success": False, "error": response.get("error"), "raw": response}
+    traces = response.get("result") or []
+    if isinstance(traces, list):
+        traces = sorted(traces, key=lambda row: (((row.get("timestamp") or {}).get("start")) or ""), reverse=True)
+        traces = traces[: int(args.get("limit") or 100)]
+    return {"domain": domain, "item_id": item_id, "entity_id": entity_id, "success": True, "count": len(traces) if isinstance(traces, list) else None, "traces": traces}
+
+
+def get_trace(args: dict[str, Any]) -> dict[str, Any]:
+    domain = str(args["domain"])
+    item_id, entity_id = trace_item_id(domain, args)
+    if not item_id:
+        raise ValueError("Pass item_id, id, or entity_id")
+    run_id = args.get("run_id")
+    listed = None
+    if not run_id and bool(args.get("latest")):
+        listed = list_traces({"domain": domain, "item_id": item_id, "limit": 1})
+        if listed.get("traces"):
+            run_id = listed["traces"][0].get("run_id")
+    if not run_id:
+        raise ValueError("Pass run_id or latest=true")
+    response = ha_ws_call({"type": "trace/get", "domain": domain, "item_id": item_id, "run_id": str(run_id)})
+    return {"domain": domain, "item_id": item_id, "entity_id": entity_id, "run_id": str(run_id), "success": bool(response.get("success")), "trace": response.get("result"), "error": response.get("error"), "listed": listed}
+
+
+def list_trace_contexts(args: dict[str, Any]) -> dict[str, Any]:
+    domain = str(args["domain"])
+    item_id, entity_id = trace_item_id(domain, args)
+    message: dict[str, Any] = {"type": "trace/contexts"}
+    if item_id:
+        message.update({"domain": domain, "item_id": item_id})
+    response = ha_ws_call(message)
+    return {"domain": domain, "item_id": item_id, "entity_id": entity_id, "success": bool(response.get("success")), "contexts": response.get("result"), "error": response.get("error")}
 
 
 def yaml_config_files(include_blueprints: bool = False) -> list[Path]:
@@ -2669,8 +2731,7 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         entity_id = identifier
         if not entity_id:
             raise ValueError("entity_id or identifier is required")
-        automation_id = entity_id.removeprefix("automation.")
-        return ha_request("GET", f"/config/automation/trace/{automation_id}")
+        return get_automation_traces({"entity_id": entity_id, "latest": bool(args.get("latest")), "include_trace": bool(args.get("include_trace")), "limit": int(args.get("limit") or 100)})
     if name == "ha_get_operation_status":
         return {"core": supervisor_request("GET", "/core/info"), "supervisor": supervisor_request("GET", "/supervisor/info")}
     if name == "ha_get_addon":
