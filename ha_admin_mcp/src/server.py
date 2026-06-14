@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.26"
+APP_VERSION = "0.1.27"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -1124,6 +1124,30 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "live_lovelace_get_outline",
+        "Read a compact active Lovelace dashboard outline through the Home Assistant WebSocket API",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "include_entities": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "live_lovelace_find_cards",
+        "Find cards in active Lovelace config through the Home Assistant WebSocket API",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
+        "live_lovelace_get_card",
+        "Read exactly one card from active Lovelace config through the Home Assistant WebSocket API",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}},
+        [],
+    ),
+    tool_schema(
+        "live_lovelace_patch_card",
+        "Patch exactly one card and save through the Home Assistant WebSocket API instead of storage writes",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
         "live_lovelace_save_config",
         "Save Lovelace config through the Home Assistant WebSocket API instead of storage writes",
         {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "config": {"type": "object"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}},
@@ -1901,6 +1925,14 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
     if name == "live_lovelace_get_config":
         return live_lovelace_get_config(args)
+    if name == "live_lovelace_get_outline":
+        return live_lovelace_get_outline(args)
+    if name == "live_lovelace_find_cards":
+        return live_lovelace_find_cards(args)
+    if name == "live_lovelace_get_card":
+        return live_lovelace_get_card(args)
+    if name == "live_lovelace_patch_card":
+        return live_lovelace_patch_card(args)
     if name == "live_lovelace_save_config":
         return live_lovelace_save_config(args)
     if name == "live_lovelace_resources":
@@ -3574,6 +3606,114 @@ def live_lovelace_get_config(args: dict[str, Any]) -> dict[str, Any]:
     return ha_ws_call(message)
 
 
+def live_lovelace_config(args: dict[str, Any]) -> dict[str, Any]:
+    response = live_lovelace_get_config(args)
+    if not response.get("success"):
+        raise ValueError(f"live Lovelace config read failed: {response}")
+    config = response.get("result")
+    if not isinstance(config, dict):
+        raise ValueError("live Lovelace config result is not an object")
+    return config
+
+
+def live_lovelace_get_outline(args: dict[str, Any]) -> dict[str, Any]:
+    config = live_lovelace_config(args)
+    views = config.get("views")
+    if not isinstance(views, list):
+        raise ValueError("live Lovelace config does not contain views")
+    rows = []
+    for view_index, view in enumerate(views):
+        if not isinstance(view, dict):
+            rows.append({"index": view_index, "view": view})
+            continue
+        cards = []
+        for row in iter_lovelace_cards(view, f"$.views[{view_index}]"):
+            card_row = {"path": row["path"], "type": row.get("type"), "title": row.get("title")}
+            if bool(args.get("include_entities", True)):
+                card_row["entities"] = row.get("entities", [])
+            cards.append(card_row)
+        rows.append({"index": view_index, "path": f"$.views[{view_index}]", "title": view.get("title"), "view_path": view.get("path"), "type": view.get("type"), "card_count": len(view.get("cards") or []) if isinstance(view.get("cards"), list) else 0, "cards": cards})
+    return {"preferred_path": True, "title": config.get("title"), "view_count": len(rows), "views": rows}
+
+
+def live_lovelace_find_cards(args: dict[str, Any]) -> dict[str, Any]:
+    config = live_lovelace_config(args)
+    matches = live_lovelace_find_card_rows(config, args)
+    return {"preferred_path": True, "count": len(matches), "matches": matches}
+
+
+def live_lovelace_find_card_rows(config: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
+    views = config.get("views")
+    if not isinstance(views, list):
+        raise ValueError("live Lovelace config does not contain views")
+    wanted_view_index = args.get("view_index")
+    wanted_view_title = args.get("view_title")
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for view_index, view in enumerate(views):
+        if wanted_view_index is not None and view_index != int(wanted_view_index):
+            continue
+        if wanted_view_title and (not isinstance(view, dict) or str(view.get("title") or "") != wanted_view_title):
+            continue
+        for row in iter_lovelace_cards(view, f"$.views[{view_index}]"):
+            if card_matches(row, args):
+                matches.append(row)
+                if len(matches) >= limit:
+                    return matches
+    return matches
+
+
+def live_lovelace_get_card(args: dict[str, Any]) -> dict[str, Any]:
+    config = live_lovelace_config(args)
+    matches = live_lovelace_find_card_rows(config, args)
+    expected = int(args.get("expected_matches") or 1)
+    if len(matches) != expected:
+        return {"preferred_path": True, "count": len(matches), "error": f"Expected {expected} card match(es), found {len(matches)}", "matches": matches}
+    if expected != 1:
+        raise ValueError("live_lovelace_get_card requires expected_matches=1")
+    path = matches[0]["path"]
+    return {"preferred_path": True, "path": path, "card": value_at_path(config, path)}
+
+
+def live_lovelace_patch_card(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("dry_run")) and not bool(args.get("force")):
+        raise ValueError("live_lovelace_patch_card requires force=true")
+    if args.get("patch") is None and args.get("replace") is None and not args.get("remove_keys"):
+        raise ValueError("Pass patch, replace, or remove_keys")
+    config = live_lovelace_config(args)
+    matches = live_lovelace_find_card_rows(config, args)
+    expected = int(args.get("expected_matches") or 1)
+    if len(matches) != expected:
+        return {"preferred_path": True, "changed": False, "error": f"Expected {expected} match(es), found {len(matches)}", "matches": matches}
+    if expected != 1:
+        raise ValueError("live_lovelace_patch_card requires expected_matches=1")
+    path = matches[0]["path"]
+    card = value_at_path(config, path)
+    if not isinstance(card, dict):
+        raise ValueError("Matched path is not a card object")
+    before = json.loads(json.dumps(card, default=str))
+    if args.get("replace") is not None:
+        replacement = args["replace"]
+        if not isinstance(replacement, dict):
+            raise ValueError("replace must be an object")
+        set_value_at_path(config, path, replacement)
+        after = replacement
+    else:
+        for key_name in args.get("remove_keys") or []:
+            card.pop(str(key_name), None)
+        patch = args.get("patch") or {}
+        if patch:
+            if not isinstance(patch, dict):
+                raise ValueError("patch must be an object")
+            card.update(patch)
+        after = json.loads(json.dumps(card, default=str))
+    if bool(args.get("dry_run")):
+        return {"preferred_path": True, "changed": False, "dry_run": True, "path": path, "before": before, "after": after}
+    save_args = {"url_path": args.get("url_path"), "dashboard_id": args.get("dashboard_id"), "config": config, "backup": bool(args.get("backup", True)), "force": True}
+    saved = live_lovelace_save_config(save_args)
+    return {"preferred_path": True, "changed": True, "path": path, "before": before, "after": after, "save": saved}
+
+
 def live_lovelace_save_config(args: dict[str, Any]) -> dict[str, Any]:
     if not bool(args.get("force")):
         raise ValueError("live_lovelace_save_config requires force=true")
@@ -4340,7 +4480,7 @@ def get_prompt(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         text = (
             f"Patch {target} on {dashboard} safely. Use list_lovelace_dashboards, get_lovelace_view or "
             "find_lovelace_cards/get_lovelace_card to locate exactly one card. For actual UI/dashboard changes, prefer "
-            "live_lovelace_get_config/live_lovelace_save_config or the Home Assistant UI path, then verify the rendered UI. "
+            "live_lovelace_get_outline/live_lovelace_find_cards/live_lovelace_patch_card or the Home Assistant UI path, then verify the rendered UI. "
             "Storage-backed Lovelace patch tools return a warning because they are not the preferred UI change path."
         )
     elif name == "config_safe_edit":
