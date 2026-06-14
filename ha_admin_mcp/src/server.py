@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.30"
+APP_VERSION = "0.1.31"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -684,6 +684,7 @@ TOOLS = [
     tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("list_scene_configs", "List scene entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_scene_config", "Get compact scene config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("get_automation_traces", "Read Home Assistant automation trace data by automation entity_id or id", {"entity_id": {"type": "string"}, "id": {"type": "string"}}, []),
     tool_schema("active_config_index", "Return a compact index of the active /config tree, packages, blueprints, templates, and key YAML files", {"limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("search_active_config", "Search active /config YAML, package, template, and blueprint files with /config or relative paths accepted", {"query": {"type": "string"}, "path": {"type": "string"}, "filename": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
     tool_schema("list_template_configs", "Find template configuration blocks in templates.yaml, configuration.yaml, and package YAML", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
@@ -691,6 +692,8 @@ TOOLS = [
     tool_schema("list_blueprints", "List blueprint YAML files under /config/blueprints", {"domain": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("read_blueprint", "Read one blueprint YAML file by relative path or domain/name", {"path": {"type": "string"}, "domain": {"type": "string"}, "name": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}}, []),
     tool_schema("search_blueprints", "Search blueprint YAML files under /config/blueprints", {"query": {"type": "string"}, "domain": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
+    tool_schema("get_recorder_config", "Find recorder config source context and return recorder DB info", {"query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("write_recorder_package", "Write a dedicated /config/packages recorder YAML file with dry-run, backup, and config check", {"filename": {"type": "string"}, "config": {"type": "object"}, "content": {"type": "string"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}, "check_config": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema(
         "get_events",
         "Return Home Assistant event names",
@@ -1039,6 +1042,8 @@ TOOLS = [
         {"id": {"type": "string"}, "name": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
         [],
     ),
+    tool_schema("get_config_entry", "Get exactly one core.config_entries entry by entry_id, domain/title query, or source", {"entry_id": {"type": "string"}, "domain": {"type": "string"}, "title": {"type": "string"}, "source": {"type": "string"}, "query": {"type": "string"}}, []),
+    tool_schema("patch_config_entry", "Patch exactly one core.config_entries entry with dry-run, backup, and expected_hash support", {"entry_id": {"type": "string"}, "domain": {"type": "string"}, "title": {"type": "string"}, "source": {"type": "string"}, "query": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}}, []),
     tool_schema(
         "patch_entity_registry_entry",
         "Patch one core.entity_registry entry by entity_id, unique_id, or id",
@@ -1798,6 +1803,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_domain_configs("scene", args)
     if name == "get_scene_config":
         return get_domain_config("scene", args)
+    if name == "get_automation_traces":
+        return get_automation_traces(args)
     if name == "active_config_index":
         return active_config_index(args)
     if name == "search_active_config":
@@ -1812,6 +1819,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return read_blueprint(args)
     if name == "search_blueprints":
         return search_blueprints(args)
+    if name == "get_recorder_config":
+        return get_recorder_config(args)
+    if name == "write_recorder_package":
+        return write_recorder_package(args)
     if name == "get_events":
         return ha_request("GET", "/events")
     if name == "get_services":
@@ -1915,6 +1926,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_device_registry(args)
     if name == "search_config_entries":
         return search_config_entries(args)
+    if name == "get_config_entry":
+        return get_config_entry(args)
+    if name == "patch_config_entry":
+        return patch_config_entry(args)
     if name == "search_area_registry":
         return search_named_registry("core.area_registry", "areas", args)
     if name == "search_floor_registry":
@@ -2321,6 +2336,14 @@ def get_domain_config(domain: str, args: dict[str, Any]) -> dict[str, Any]:
     return {"domain": domain, "identifier": identifier, "entity_id": entity_id, "state": state, "matches": compact["items"], "source_contexts": contexts}
 
 
+def get_automation_traces(args: dict[str, Any]) -> dict[str, Any]:
+    identifier = args.get("id") or args.get("entity_id")
+    if not identifier:
+        raise ValueError("Pass entity_id or id")
+    automation_id = str(identifier).removeprefix("automation.")
+    return {"automation_id": automation_id, "traces": ha_request("GET", f"/config/automation/trace/{automation_id}")}
+
+
 def yaml_config_files(include_blueprints: bool = False) -> list[Path]:
     roots = [CONFIG_ROOT]
     packages = config_path("packages")
@@ -2497,6 +2520,63 @@ def search_blueprints(args: dict[str, Any]) -> dict[str, Any]:
         root = root / str(args["domain"]).strip("/")
     result = search_active_config({"path": str(root.relative_to(CONFIG_ROOT)), "query": args["query"], "filename": "*.y*ml", "limit": int(args.get("limit") or 100), "context_lines": int(args.get("context_lines") or 10)})
     result["blueprint_root"] = str(root)
+    return result
+
+
+def get_recorder_config(args: dict[str, Any]) -> dict[str, Any]:
+    query = args.get("query") or "recorder:"
+    contexts = search_active_config({"query": query, "filename": "*.yaml", "limit": 50, "context_lines": int(args.get("context_lines") or 40)})
+    return {"query": query, "source_contexts": contexts, "db": recorder_get_db_info()}
+
+
+def dump_simple_yaml(value: Any, indent: int = 0) -> str:
+    space = " " * indent
+    if isinstance(value, dict):
+        lines = []
+        for key, child in value.items():
+            if isinstance(child, (dict, list)):
+                lines.append(f"{space}{key}:")
+                lines.append(dump_simple_yaml(child, indent + 2))
+            else:
+                lines.append(f"{space}{key}: {json.dumps(child) if isinstance(child, str) else child}")
+        return "\n".join(lines)
+    if isinstance(value, list):
+        lines = []
+        for child in value:
+            if isinstance(child, (dict, list)):
+                lines.append(f"{space}-")
+                lines.append(dump_simple_yaml(child, indent + 2))
+            else:
+                lines.append(f"{space}- {json.dumps(child) if isinstance(child, str) else child}")
+        return "\n".join(lines)
+    return f"{space}{json.dumps(value) if isinstance(value, str) else value}"
+
+
+def write_recorder_package(args: dict[str, Any]) -> dict[str, Any]:
+    filename = str(args.get("filename") or "ha_admin_mcp_recorder.yaml")
+    if Path(filename).name != filename or not filename.endswith((".yaml", ".yml")):
+        raise ValueError("filename must be a simple .yaml or .yml file name")
+    if not bool(args.get("dry_run")) and not bool(args.get("force")):
+        raise ValueError("write_recorder_package requires force=true")
+    if args.get("content") is not None:
+        content = str(args["content"]).rstrip() + "\n"
+    elif args.get("config") is not None:
+        config = args["config"]
+        if not isinstance(config, dict):
+            raise ValueError("config must be an object")
+        content = "recorder:\n" + dump_simple_yaml(config, 2).rstrip() + "\n"
+    else:
+        raise ValueError("Pass content or config")
+    write_args = {
+        "path": str(Path("packages") / filename),
+        "content": content,
+        "backup": bool(args.get("backup", True)),
+        "dry_run": bool(args.get("dry_run")),
+        "expected_hash": args.get("expected_hash"),
+        "check_config": bool(args.get("check_config", True)),
+    }
+    result = write_config_file(write_args)
+    result["note"] = "Dedicated recorder package written under /config/packages; use check_config_and_reload or restart if HA reports recorder changes require restart."
     return result
 
 
@@ -3539,6 +3619,17 @@ def search_config_entries(args: dict[str, Any]) -> dict[str, Any]:
             continue
         matches.append(row)
     return {"key": "core.config_entries", "count": len(matches), "matches": matches}
+
+
+def get_config_entry(args: dict[str, Any]) -> dict[str, Any]:
+    result = search_config_entries(args | {"limit": 100})
+    if len(result["matches"]) != 1:
+        raise ValueError(f"Expected exactly one config entry, found {len(result['matches'])}")
+    return {"key": "core.config_entries", "entry": result["matches"][0]}
+
+
+def patch_config_entry(args: dict[str, Any]) -> dict[str, Any]:
+    return patch_registry_entry("core.config_entries", "entries", args, ["entry_id", "domain", "title", "source"])
 
 
 def search_named_registry(key: str, list_name: str, args: dict[str, Any]) -> dict[str, Any]:
