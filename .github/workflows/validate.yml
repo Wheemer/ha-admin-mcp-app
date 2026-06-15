@@ -1,0 +1,42 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validation dependencies
+        run: python -m pip install --upgrade pyyaml
+
+      - name: Compile MCP server
+        run: python -m py_compile ha_admin_mcp/src/server.py
+
+      - name: Validate app metadata
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          repo = yaml.safe_load(Path("repository.yaml").read_text())
+          config = yaml.safe_load(Path("ha_admin_mcp/config.yaml").read_text())
+
+          assert repo["url"] == "https://github.com/Wheemer/ha-admin-mcp-app"
+          assert config["slug"] == "ha_admin_mcp"
+          assert config["full_access"] is True
+          assert config["hassio_role"] == "admin"
+          assert "8124/tcp" in config["ports"]
+          assert Path("ha_admin_mcp/logo.svg").is_file()
+          assert Path("ha_admin_mcp/icon.svg").is_file()
+          PY

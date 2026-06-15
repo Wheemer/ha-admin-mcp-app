@@ -1,5 +1,10 @@
 # HA Admin MCP App
 
+[![Validate](https://github.com/Wheemer/ha-admin-mcp-app/actions/workflows/validate.yml/badge.svg)](https://github.com/Wheemer/ha-admin-mcp-app/actions/workflows/validate.yml)
+[![Add app repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FWheemer%2Fha-admin-mcp-app)
+
+![HA Admin MCP logo](logo.svg)
+
 ## EXTREMELY DANGEROUS
 
 This app gives MCP clients root-level administrative control over your Home Assistant system.
@@ -7,6 +12,8 @@ This app gives MCP clients root-level administrative control over your Home Assi
 If enabled, an MCP client can read secrets, edit configuration, delete files, run shell commands, call the Supervisor API, restart Home Assistant, modify Lovelace storage, inspect registries, create or restore backups, and break your system so badly that Home Assistant may not boot.
 
 Install this only if you intentionally want a remote automation client such as Codex to have broad administrative control.
+
+Do not expose this app to the internet. Do not run it on a shared or untrusted Home Assistant instance. Treat access to this endpoint like root access to Home Assistant.
 
 ## Endpoint
 
