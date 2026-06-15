@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.35"
+APP_VERSION = "0.1.36"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
@@ -31,6 +31,8 @@ MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
 MCP_PATH = "/api/mcp"
+MCP_COMPAT_PATH = "/mcp"
+MCP_PATHS = {MCP_PATH, MCP_COMPAT_PATH}
 LOG_LEVEL = "info"
 DANGEROUS_PATHS = {"/", "/config", "/backup", "/data", "/share", "/ssl", "/addons", "/usr", "/bin", "/sbin", "/etc", "/root", "/var"}
 READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "check", "render", "overview", "summary")
@@ -1469,6 +1471,13 @@ UPSTREAM_HA_MCP_TOOL_NAMES = [
     "ha_get_overview",
     "ha_get_state",
     "ha_search",
+    "ha_search_entities",
+    "ha_deep_search",
+    "ha_search_tools",
+    "ha_call_read_tool",
+    "ha_call_write_tool",
+    "ha_call_delete_tool",
+    "ha_get_skill_guide",
     "ha_bulk_control",
     "ha_call_event",
     "ha_call_service",
@@ -1521,6 +1530,22 @@ UPSTREAM_COMPAT_TOOL_SCHEMAS = [
             "dry_run": {"type": "boolean"},
             "force": {"type": "boolean"},
             "expected_hash": {"type": "string"},
+            "event_type": {"type": "string"},
+            "event": {"type": "string"},
+            "url": {"type": "string"},
+            "resource_id": {"type": "string"},
+            "resource": {"type": "object"},
+            "type": {"type": "string"},
+            "operations": {"type": "array", "items": {"type": "object"}},
+            "fields": {"type": "array", "items": {"type": "string"}},
+            "detailed": {"type": "boolean"},
+            "latest": {"type": "boolean"},
+            "include_trace": {"type": "boolean"},
+            "run_id": {"type": "string"},
+            "dashboard_id": {"type": "string"},
+            "arguments": {"type": "object"},
+            "skill": {"type": "string"},
+            "file": {"type": "string"},
         },
         [],
     )
@@ -2047,7 +2072,7 @@ def get_target_identity() -> dict[str, Any]:
     supervisor = supervisor_request("GET", "/supervisor/info")
     host = supervisor_request("GET", "/host/info")
     return {
-        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH},
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "endpoint_paths": sorted(MCP_PATHS)},
         "core": core.get("data", core) if isinstance(core, dict) else core,
         "supervisor": supervisor.get("data", supervisor) if isinstance(supervisor, dict) else supervisor,
         "host": host.get("data", host) if isinstance(host, dict) else host,
@@ -2675,6 +2700,59 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "ha_search":
         query = str(args.get("query") or "")
         return {"entities": search_entities(query, int(args.get("limit") or 20)), "tools": search_tools(query, 10)}
+    if name == "ha_search_entities":
+        query = str(args.get("query") or args.get("name") or "")
+        limit = int(args.get("limit") or 50)
+        domain = args.get("domain") or args.get("domain_filter")
+        payload = search_entities(query, limit * 2 if domain else limit)
+        results = payload.get("entities", [])
+        if domain:
+            results = [row for row in results if str(row.get("entity_id", "")).split(".", 1)[0] == str(domain)]
+        return {"entities": results[:limit], "count": len(results[:limit])}
+    if name == "ha_deep_search":
+        query = str(args.get("query") or "")
+        limit = int(args.get("limit") or 50)
+        return {
+            "entities": search_entities(query, limit),
+            "config": search_active_config({"query": query, "limit": limit}) if query else [],
+            "storage": search_common_storage(query, limit) if query else [],
+            "files": search_files({"path": str(CONFIG_ROOT), "query": query, "recursive": True, "limit": limit}) if query else [],
+            "tools": search_tools(query, 20),
+        }
+    if name == "ha_search_tools":
+        return search_tools(str(args.get("query") or ""), int(args.get("limit") or 20))
+    if name in ("ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"):
+        target = args.get("name") or args.get("tool")
+        if not target:
+            raise ValueError("name is required")
+        target_name = str(target)
+        if target_name in {name, "ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"}:
+            raise ValueError("Refusing recursive proxy tool call")
+        lower = target_name.lower()
+        if name == "ha_call_read_tool" and not any(hint in lower for hint in READ_ONLY_HINTS):
+            raise ValueError(f"{target_name} is not obviously read-only; use ha_call_write_tool or the tool directly")
+        if name == "ha_call_delete_tool" and not any(hint in lower for hint in ("delete", "remove")):
+            raise ValueError(f"{target_name} is not obviously delete/remove; use ha_call_write_tool or the tool directly")
+        return call_tool(target_name, args.get("arguments") or {})
+    if name == "ha_get_skill_guide":
+        return {
+            "note": "This app exposes the upstream ha_get_skill_guide name. Use the listed built-in prompts and tool groups for the same job in this full-access app.",
+            "requested_skill": args.get("skill"),
+            "requested_file": args.get("file"),
+            "prompts": PROMPTS,
+            "recommended_tools": [
+                "search_tools",
+                "ha_search_tools",
+                "diagnostic_bundle",
+                "check_config_and_reload",
+                "live_lovelace_find_cards",
+                "live_lovelace_patch_card",
+                "search_active_config",
+                "search_storage_key",
+                "read_file_window",
+                "run_command",
+            ],
+        }
     if name == "ha_get_overview":
         return system_overview()
     if name == "ha_get_system_health":
@@ -2731,7 +2809,13 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         entity_id = identifier
         if not entity_id:
             raise ValueError("entity_id or identifier is required")
-        return get_automation_traces({"entity_id": entity_id, "latest": bool(args.get("latest")), "include_trace": bool(args.get("include_trace")), "limit": int(args.get("limit") or 100)})
+        return get_automation_traces({
+            "entity_id": entity_id,
+            "run_id": args.get("run_id"),
+            "latest": bool(args.get("latest")),
+            "include_trace": bool(args.get("include_trace")),
+            "limit": int(args.get("limit") or 100),
+        })
     if name == "ha_get_operation_status":
         return {"core": supervisor_request("GET", "/core/info"), "supervisor": supervisor_request("GET", "/supervisor/info")}
     if name == "ha_get_addon":
@@ -2973,16 +3057,17 @@ def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
     recursive = bool(args.get("recursive", True))
     limit = int(args.get("limit") or 100)
     max_file_bytes = int(args.get("max_file_bytes") or 2_000_000)
-    iterator = root.rglob("*") if recursive else root.iterdir()
+    iterator = [root] if root.is_file() else root.rglob("*") if recursive else root.iterdir()
     matches: list[dict[str, Any]] = []
     for path in iterator:
         if len(matches) >= limit:
             break
         try:
-            if filename and not fnmatch.fnmatch(path.name, filename):
+            filename_match = file_matches_pattern(path, root, str(filename)) if filename else False
+            if filename and not filename_match:
                 continue
             if filename and not query:
-                matches.append({"path": str(path), "match": "filename"})
+                matches.append(file_match_row(path, root, "filename"))
                 continue
             if not query or not path.is_file() or path.stat().st_size > max_file_bytes:
                 continue
@@ -2990,11 +3075,39 @@ def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             for line_number, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
                 if query in line.lower():
-                    matches.append({"path": str(path), "line": line_number, "text": line[:500]})
+                    row = file_match_row(path, root, "content")
+                    row.update({"line": line_number, "text": line[:500], "filename_match": filename_match})
+                    matches.append(row)
                     break
         except OSError as err:
             matches.append({"path": str(path), "error": str(err)})
     return matches
+
+
+def file_match_row(path: Path, root: Path, match: str) -> dict[str, Any]:
+    row = {"path": str(path), "name": path.name, "match": match}
+    try:
+        row["relative_path"] = str(path.resolve().relative_to(root.resolve())).replace("\\", "/")
+    except ValueError:
+        pass
+    return row
+
+
+def file_matches_pattern(path: Path, root: Path, pattern: str) -> bool:
+    normalized = pattern.replace("\\", "/").lower()
+    try:
+        relative = str(path.resolve().relative_to(root.resolve())).replace("\\", "/").lower()
+    except ValueError:
+        relative = str(path).replace("\\", "/").lower()
+    candidates = {
+        path.name.lower(),
+        relative,
+        str(path).replace("\\", "/").lower(),
+    }
+    patterns = {normalized}
+    if "/" not in normalized:
+        patterns.add(f"*/{normalized}")
+    return any(fnmatch.fnmatch(candidate, test) for candidate in candidates for test in patterns)
 
 
 def backup_path(path: Path, label: str | None) -> dict[str, Any]:
@@ -3469,6 +3582,37 @@ def search_storage_key(key: str, query: str, limit: int) -> list[dict[str, Any]]
             if len(matches) >= limit:
                 break
     return matches
+
+
+def search_common_storage(query: str, limit: int) -> dict[str, Any]:
+    keys = [
+        "core.entity_registry",
+        "core.device_registry",
+        "core.config_entries",
+        "core.area_registry",
+        "core.floor_registry",
+        "core.label_registry",
+        "core.restore_state",
+        "lovelace",
+        "lovelace_resources",
+    ]
+    rows = []
+    per_key_limit = max(1, min(limit, 20))
+    for key in keys:
+        if len(rows) >= limit:
+            break
+        try:
+            matches = search_storage_key(key, query, per_key_limit)
+        except FileNotFoundError:
+            continue
+        except Exception as err:
+            rows.append({"key": key, "error": str(err)})
+            continue
+        for match in matches:
+            rows.append({"key": key, **match})
+            if len(rows) >= limit:
+                break
+    return {"query": query, "count": len(rows), "matches": rows}
 
 
 def compact_value(value: Any, max_chars: int = 500) -> Any:
@@ -4876,6 +5020,10 @@ def completion_result() -> dict[str, Any]:
     return {"completion": {"values": [], "total": 0, "hasMore": False}}
 
 
+def is_mcp_path(path: str) -> bool:
+    return urllib.parse.urlsplit(path).path in MCP_PATHS
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HAAdminMCP/0.1"
 
@@ -4883,13 +5031,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.write_json({"ok": True, "dangerous": True})
             return
-        if self.path == MCP_PATH:
+        if is_mcp_path(self.path):
             self.send_error(405, "SSE streams are not implemented")
             return
         self.send_error(404)
 
     def do_POST(self) -> None:
-        if self.path != MCP_PATH:
+        if not is_mcp_path(self.path):
             self.send_error(404)
             return
         if not self.authorized():
@@ -4913,7 +5061,7 @@ class Handler(BaseHTTPRequestHandler):
         self.write_json(response, headers=extra_headers)
 
     def do_DELETE(self) -> None:
-        if self.path == MCP_PATH:
+        if is_mcp_path(self.path):
             self.send_response(202)
             self.send_header("Content-Length", "0")
             self.end_headers()

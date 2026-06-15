@@ -7,7 +7,6 @@
 ### Privileged MCP control surface for Home Assistant
 
 [![Validate](https://img.shields.io/github/actions/workflow/status/Wheemer/ha-admin-mcp-app/validate.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=VALIDATE&labelColor=555555)](https://github.com/Wheemer/ha-admin-mcp-app/actions/workflows/validate.yml)
-[![Add app repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FWheemer%2Fha-admin-mcp-app)
 
 </div>
 
@@ -21,12 +20,30 @@ Install this only if you intentionally want a remote automation client such as C
 
 Do not expose this app to the internet. Do not run it on a shared or untrusted Home Assistant instance. Treat access to this endpoint like root access to Home Assistant.
 
+## Installation
+
+[![Open your Home Assistant instance and add this app repository.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FWheemer%2Fha-admin-mcp-app)
+
+If the button does not work, add this repository manually:
+
+```text
+https://github.com/Wheemer/ha-admin-mcp-app
+```
+
+Install **HA Admin MCP** from the app store, review the options, then start it manually.
+
 ## Endpoint
 
 The app exposes a JSON-RPC MCP endpoint:
 
 ```text
 POST http://HOME_ASSISTANT_HOST:8124/api/mcp
+```
+
+It also accepts the standard upstream-compatible path:
+
+```text
+POST http://HOME_ASSISTANT_HOST:8124/mcp
 ```
 
 If `admin_token` is set, pass it as:
