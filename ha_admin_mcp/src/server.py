@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.37"
+APP_VERSION = "0.1.38"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")
@@ -1594,6 +1594,86 @@ UPSTREAM_COMPAT_TOOL_SCHEMAS = [
 TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
 
 
+def high_level_alias_candidates(upstream_name: str) -> list[str]:
+    if not upstream_name.startswith("ha_"):
+        return []
+    base = upstream_name.removeprefix("ha_")
+    candidates = [base]
+    transforms = (
+        ("set_", "update_"),
+        ("remove_", "delete_"),
+        ("config_get_", "get_"),
+        ("config_set_", "update_"),
+        ("config_remove_", "delete_"),
+        ("config_delete_", "delete_"),
+        ("config_list_", "list_"),
+    )
+    for prefix, replacement in transforms:
+        if base.startswith(prefix):
+            candidates.append(replacement + base.removeprefix(prefix))
+    return candidates
+
+
+HIGH_LEVEL_COMPAT_TOOL_MAP: dict[str, str] = {}
+existing_tool_names = {tool["name"] for tool in TOOLS}
+for upstream_name in UPSTREAM_HA_MCP_TOOL_NAMES:
+    for alias in high_level_alias_candidates(upstream_name):
+        if alias not in existing_tool_names and alias not in HIGH_LEVEL_COMPAT_TOOL_MAP:
+            HIGH_LEVEL_COMPAT_TOOL_MAP[alias] = upstream_name
+
+HIGH_LEVEL_COMPAT_TOOL_SCHEMAS = [
+    tool_schema(
+        alias,
+        f"High-level Home Assistant alias for {upstream_name}; routed through this app's full-access primitives",
+        {
+            "entity_id": {"type": "string"},
+            "identifier": {"type": "string"},
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "query": {"type": "string"},
+            "domain": {"type": "string"},
+            "service": {"type": "string"},
+            "action": {"type": "string"},
+            "data": {"type": "object"},
+            "config": {"type": "object"},
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "template": {"type": "string"},
+            "slug": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "start_time": {"type": "string"},
+            "end_time": {"type": "string"},
+            "hours": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "period": {"type": "string"},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+            "event_type": {"type": "string"},
+            "event": {"type": "string"},
+            "url": {"type": "string"},
+            "resource_id": {"type": "string"},
+            "resource": {"type": "object"},
+            "type": {"type": "string"},
+            "operations": {"type": "array", "items": {"type": "object"}},
+            "fields": {"type": "array", "items": {"type": "string"}},
+            "detailed": {"type": "boolean"},
+            "latest": {"type": "boolean"},
+            "include_trace": {"type": "boolean"},
+            "run_id": {"type": "string"},
+            "dashboard_id": {"type": "string"},
+            "arguments": {"type": "object"},
+            "skill": {"type": "string"},
+            "file": {"type": "string"},
+        },
+        [],
+    )
+    for alias, upstream_name in sorted(HIGH_LEVEL_COMPAT_TOOL_MAP.items())
+]
+
+TOOLS.extend(HIGH_LEVEL_COMPAT_TOOL_SCHEMAS)
+
+
 RESOURCES = [
     {"uri": "ha://core/info", "name": "Home Assistant Core info", "mimeType": "application/json"},
     {"uri": "ha://supervisor/info", "name": "Supervisor info", "mimeType": "application/json"},
@@ -1665,6 +1745,8 @@ PROMPTS = [
 def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name in UPSTREAM_HA_MCP_TOOL_NAMES:
         return call_upstream_compat_tool(name, args)
+    if name in HIGH_LEVEL_COMPAT_TOOL_MAP:
+        return call_upstream_compat_tool(HIGH_LEVEL_COMPAT_TOOL_MAP[name], args)
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
@@ -2976,13 +3058,17 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         return patch_named_registry(registry_key, list_name, args, remove="_remove_" in name)
     if name in ("ha_config_get_automation", "ha_config_get_script", "ha_config_get_scene"):
         domain = {"ha_config_get_automation": "automation", "ha_config_get_script": "script", "ha_config_get_scene": "scene"}[name]
-        return ha_request("GET", f"/config/{domain}/config/{identifier}") if identifier else list_entities({"domain": domain, "detailed": True, "limit": 10000})
+        item_id = config_item_id(domain, args)
+        return ha_request("GET", f"/config/{domain}/config/{item_id}") if item_id else list_entities({"domain": domain, "detailed": True, "limit": 10000})
     if name in ("ha_config_set_automation", "ha_config_set_script", "ha_config_set_scene"):
         domain = "automation" if "automation" in name else "script" if "script" in name else "scene"
-        return ha_request("POST", f"/config/{domain}/config/{identifier or args.get('id')}", args.get("config") or args.get("data") or {})
+        return update_config_item(domain, args)
     if name in ("ha_config_remove_automation", "ha_config_remove_script", "ha_config_remove_scene"):
         domain = "automation" if "automation" in name else "script" if "script" in name else "scene"
-        return ha_request("DELETE", f"/config/{domain}/config/{identifier}")
+        item_id = config_item_id(domain, args)
+        if not item_id:
+            raise ValueError(f"{domain} id, entity_id, or identifier is required")
+        return ha_request("DELETE", f"/config/{domain}/config/{item_id}")
     if name == "ha_manage_backup":
         action = args.get("action") or "list"
         if action == "list":
@@ -3019,6 +3105,46 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "args": args,
         }
     raise ValueError(f"Unhandled upstream compatibility tool: {name}")
+
+
+def config_item_id(domain: str, args: dict[str, Any]) -> str | None:
+    raw = first_present(args, "id", "identifier", "entity_id", "item_id", "name")
+    if raw:
+        text = str(raw)
+        prefix = f"{domain}."
+        return text.removeprefix(prefix)
+    query = args.get("query")
+    if query:
+        matches = list_domain_configs(domain, {"query": query, "limit": 2}).get("items", [])
+        if len(matches) == 1:
+            match = matches[0]
+            return str(match.get("config_id") or match.get("id") or match.get("entity_id", "").removeprefix(f"{domain}."))
+        if len(matches) > 1:
+            raise ValueError(f"Query matched multiple {domain}s; pass id or entity_id")
+    return None
+
+
+def update_config_item(domain: str, args: dict[str, Any]) -> dict[str, Any]:
+    item_id = config_item_id(domain, args)
+    if not item_id:
+        raise ValueError(f"{domain} id, entity_id, or identifier is required")
+    config = args.get("config") if args.get("config") is not None else args.get("data")
+    if config is None and args.get("content"):
+        config = json.loads(str(args["content"]))
+    if not isinstance(config, dict):
+        raise ValueError("config or data object is required")
+    endpoint = f"/config/{domain}/config/{item_id}"
+    if bool(args.get("dry_run")):
+        current = ha_request("GET", endpoint)
+        return {"domain": domain, "id": item_id, "endpoint": endpoint, "dry_run": True, "current": current, "would_write": config}
+    audit_event(f"update_{domain}", {"id": item_id})
+    result = ha_request("POST", endpoint, config)
+    response: dict[str, Any] = {"domain": domain, "id": item_id, "endpoint": endpoint, "updated": True, "result": result}
+    if bool(args.get("check_config")):
+        response["check_config"] = run_config_check()
+    if bool(args.get("reload")):
+        response["reload"] = ha_request("POST", f"/services/{domain}/reload", {})
+    return response
 
 
 def patch_named_registry(registry_key: str, list_name: str, args: dict[str, Any], remove: bool = False) -> dict[str, Any]:
