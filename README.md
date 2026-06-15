@@ -1,9 +1,15 @@
+<div align="center">
+
+<img src="ha_admin_mcp/icon.png" width="112" alt="HA Admin MCP icon">
+
 # HA Admin MCP App
 
-[![Validate](https://github.com/Wheemer/ha-admin-mcp-app/actions/workflows/validate.yml/badge.svg)](https://github.com/Wheemer/ha-admin-mcp-app/actions/workflows/validate.yml)
-[![Add app repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FWheemer%2Fha-admin-mcp-app)
+### Privileged MCP control surface for Home Assistant
 
-![HA Admin MCP logo](ha_admin_mcp/logo.svg)
+[![Validate](https://img.shields.io/github/actions/workflow/status/Wheemer/ha-admin-mcp-app/validate.yml?branch=master&style=for-the-badge&logo=github&logoColor=white&label=VALIDATE&labelColor=555555)](https://github.com/Wheemer/ha-admin-mcp-app/actions/workflows/validate.yml)
+[![Add app repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FWheemer%2Fha-admin-mcp-app)
+
+</div>
 
 > EXTREMELY DANGEROUS Home Assistant app that exposes broad MCP control over your Home Assistant instance.
 

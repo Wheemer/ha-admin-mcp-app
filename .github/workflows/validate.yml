@@ -39,4 +39,6 @@ jobs:
           assert "8124/tcp" in config["ports"]
           assert Path("ha_admin_mcp/logo.svg").is_file()
           assert Path("ha_admin_mcp/icon.svg").is_file()
+          assert Path("ha_admin_mcp/logo.png").is_file()
+          assert Path("ha_admin_mcp/icon.png").is_file()
           PY
