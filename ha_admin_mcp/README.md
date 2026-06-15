@@ -20,6 +20,8 @@ Install this only if you intentionally want a remote automation client such as C
 
 Do not expose this app to the internet. Do not run it on a shared or untrusted Home Assistant instance. Treat access to this endpoint like root access to Home Assistant.
 
+The container includes the same pinned FastMCP runtime used by `homeassistant-ai/ha-mcp` and mirrors its Home Assistant app-mode port and secret-path behavior.
+
 ## Installation
 
 [![Open your Home Assistant instance and add this app repository.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FWheemer%2Fha-admin-mcp-app)
@@ -37,14 +39,13 @@ Install **HA Admin MCP** from the app store, review the options, then start it m
 The app exposes a JSON-RPC MCP endpoint:
 
 ```text
-POST http://HOME_ASSISTANT_HOST:8124/api/mcp
+POST http://HOME_ASSISTANT_HOST:9583/private_<generated-token>
 ```
 
-It also accepts the standard upstream-compatible path:
+Like `homeassistant-ai/ha-mcp` app mode, this app uses a persisted `secret_path`.
+If `secret_path` is empty, the app generates `/private_<22-char-urlsafe-token>` and stores it in `/data/secret_path.txt`.
 
-```text
-POST http://HOME_ASSISTANT_HOST:8124/mcp
-```
+Standalone FastMCP mode in the upstream repo uses `/mcp`; Home Assistant app mode uses the secret path above.
 
 If `admin_token` is set, pass it as:
 

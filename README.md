@@ -35,6 +35,8 @@ There is no safety checkbox. Installing and starting the app is the warning.
 
 This repository is for direct administrative MCP access to a Home Assistant instance. It is intentionally powerful so an MCP client can inspect live state, read active config, run config checks, reload services, inspect traces, query recorder data, and perform targeted repairs without constantly falling back to SSH.
 
+The container includes the same pinned FastMCP runtime used by `homeassistant-ai/ha-mcp` and mirrors its Home Assistant app-mode port and secret-path behavior.
+
 It is not meant for shared servers, untrusted networks, public exposure, or casual experimentation.
 
 ## Installation
@@ -58,14 +60,13 @@ Install **HA Admin MCP** from the repository, review the options, then start it 
 Default endpoint:
 
 ```text
-POST http://HOME_ASSISTANT_HOST:8124/api/mcp
+POST http://HOME_ASSISTANT_HOST:9583/private_<generated-token>
 ```
 
-The app also accepts the standard upstream-compatible path:
+Like `homeassistant-ai/ha-mcp` app mode, this app uses a persisted `secret_path`.
+If `secret_path` is empty, the app generates `/private_<22-char-urlsafe-token>` and stores it in `/data/secret_path.txt`.
 
-```text
-POST http://HOME_ASSISTANT_HOST:8124/mcp
-```
+Standalone FastMCP mode in the upstream repo uses `/mcp`; Home Assistant app mode uses the secret path above.
 
 If `admin_token` is configured, send it as:
 
@@ -78,13 +79,13 @@ Authorization: Bearer YOUR_TOKEN
 ```yaml
 admin_token: ""
 bind_host: 0.0.0.0
-port: 8124
+secret_path: ""
 command_timeout_seconds: 300
 ```
 
 - `admin_token`: optional bearer token for MCP requests. Leaving this empty means no app-level token is required.
 - `bind_host`: interface to bind. The default listens on all interfaces available to the app.
-- `port`: host port for the MCP endpoint.
+- `secret_path`: optional MCP path override. Leave empty to auto-generate and persist an upstream-style `/private_...` path.
 - `command_timeout_seconds`: default timeout for command execution tools.
 
 ## Backup Policy

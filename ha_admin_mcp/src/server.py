@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -23,16 +24,16 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.36"
+APP_VERSION = "0.1.37"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
+SECRET_PATH_FILE = Path("/data/secret_path.txt")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
-MCP_PATH = "/api/mcp"
-MCP_COMPAT_PATH = "/mcp"
-MCP_PATHS = {MCP_PATH, MCP_COMPAT_PATH}
+DEFAULT_MCP_PATH = "/mcp"
+MCP_PORT = 9583
 LOG_LEVEL = "info"
 DANGEROUS_PATHS = {"/", "/config", "/backup", "/data", "/share", "/ssl", "/addons", "/usr", "/bin", "/sbin", "/etc", "/root", "/var"}
 READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "check", "render", "overview", "summary")
@@ -69,12 +70,49 @@ def load_options() -> dict[str, Any]:
     return {
         "admin_token": os.environ.get("ADMIN_TOKEN", ""),
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
-        "port": int(os.environ.get("PORT", "8124")),
+        "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
     }
 
 
 OPTIONS = load_options()
+SECRET_PATH_RE = re.compile(r"^/(?!.*://)\S{7,}$")
+
+
+def generate_secret_mcp_path() -> str:
+    return "/private_" + secrets.token_urlsafe(16)
+
+
+def valid_mcp_path(path: str) -> bool:
+    return bool(SECRET_PATH_RE.match(path))
+
+
+def resolve_mcp_path() -> str:
+    if os.name == "nt" and not ADDON_OPTIONS.exists():
+        return DEFAULT_MCP_PATH
+    configured = str(OPTIONS.get("secret_path") or "").strip()
+    if configured:
+        path = configured if configured.startswith("/") else f"/{configured}"
+        if not valid_mcp_path(path):
+            raise ValueError("secret_path must start with '/', contain no '://', and be at least 8 characters")
+        SECRET_PATH_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SECRET_PATH_FILE.write_text(path)
+        return path
+    if SECRET_PATH_FILE.exists():
+        path = SECRET_PATH_FILE.read_text().strip()
+        if valid_mcp_path(path):
+            return path
+    if not SECRET_PATH_FILE.parent.exists():
+        return DEFAULT_MCP_PATH
+    if os.environ.get("HA_ADMIN_MCP_USE_PUBLIC_MCP_PATH") == "1":
+        return DEFAULT_MCP_PATH
+    path = generate_secret_mcp_path()
+    SECRET_PATH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SECRET_PATH_FILE.write_text(path)
+    return path
+
+
+MCP_PATH = resolve_mcp_path()
 
 
 def get_supervisor_token() -> str:
@@ -2072,7 +2110,7 @@ def get_target_identity() -> dict[str, Any]:
     supervisor = supervisor_request("GET", "/supervisor/info")
     host = supervisor_request("GET", "/host/info")
     return {
-        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "endpoint_paths": sorted(MCP_PATHS)},
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
         "core": core.get("data", core) if isinstance(core, dict) else core,
         "supervisor": supervisor.get("data", supervisor) if isinstance(supervisor, dict) else supervisor,
         "host": host.get("data", host) if isinstance(host, dict) else host,
@@ -3284,12 +3322,12 @@ def list_packages(recursive: bool) -> dict[str, Any]:
     return {"root": str(root), "count": len(rows), "packages": rows}
 
 
-def secret_path() -> Path:
+def secrets_yaml_path() -> Path:
     return config_path("secrets.yaml")
 
 
 def parse_secret_lines() -> tuple[Path, list[str]]:
-    path = secret_path()
+    path = secrets_yaml_path()
     if not path.exists():
         return path, []
     return path, path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -5021,7 +5059,7 @@ def completion_result() -> dict[str, Any]:
 
 
 def is_mcp_path(path: str) -> bool:
-    return urllib.parse.urlsplit(path).path in MCP_PATHS
+    return urllib.parse.urlsplit(path).path == MCP_PATH
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -5159,13 +5197,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     host = str(OPTIONS.get("bind_host") or "0.0.0.0")
-    port = int(OPTIONS.get("port") or 8124)
     print(
         "[ha-admin-mcp] EXTREMELY DANGEROUS server listening on "
-        f"{host}:{port}; installing and starting this app grants admin MCP access",
+        f"{host}:{MCP_PORT}{MCP_PATH}; installing and starting this app grants admin MCP access",
         flush=True,
     )
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    ThreadingHTTPServer((host, MCP_PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
