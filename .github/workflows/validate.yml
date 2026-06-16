@@ -36,7 +36,7 @@ jobs:
           assert config["slug"] == "ha_admin_mcp"
           assert config["full_access"] is True
           assert config["hassio_role"] == "admin"
-          assert "8124/tcp" in config["ports"]
+          assert "9583/tcp" in config["ports"]
           assert Path("ha_admin_mcp/logo.svg").is_file()
           assert Path("ha_admin_mcp/icon.svg").is_file()
           assert Path("ha_admin_mcp/logo.png").is_file()
