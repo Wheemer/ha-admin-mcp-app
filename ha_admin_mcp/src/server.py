@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.38"
+APP_VERSION = "0.1.39"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")
@@ -3112,6 +3112,14 @@ def config_item_id(domain: str, args: dict[str, Any]) -> str | None:
     if raw:
         text = str(raw)
         prefix = f"{domain}."
+        if text.startswith(prefix):
+            try:
+                state = ha_request("GET", f"/states/{text}")
+                attrs = state.get("attributes") or {}
+                if attrs.get("id"):
+                    return str(attrs["id"])
+            except Exception:
+                pass
         return text.removeprefix(prefix)
     query = args.get("query")
     if query:
