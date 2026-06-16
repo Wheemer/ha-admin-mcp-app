@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.40"
+APP_VERSION = "0.1.41"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")

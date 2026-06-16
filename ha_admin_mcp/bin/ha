@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+
+S6_ENV_DIR = Path("/run/s6/container_environment")
+
+
+def token() -> str:
+    for name in ("SUPERVISOR_TOKEN", "HASSIO_TOKEN"):
+        value = os.environ.get(name)
+        if value:
+            return value.strip()
+        token_file = S6_ENV_DIR / name
+        if token_file.exists():
+            value = token_file.read_text().strip()
+            if value:
+                return value
+    raise SystemExit("Supervisor token not available")
+
+
+def request(method: str, endpoint: str, data: Any | None = None) -> Any:
+    body = None if data is None else json.dumps(data).encode()
+    req = urllib.request.Request(
+        "http://supervisor/" + endpoint.lstrip("/"),
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token()}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as response:
+            content = response.read()
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode(errors="replace")
+        raise SystemExit(f"Supervisor API {err.code}: {detail}") from err
+    if not content:
+        return {"result": "ok"}
+    return json.loads(content.decode())
+
+
+def print_json(value: Any) -> None:
+    print(json.dumps(value, indent=2, default=str))
+
+
+def clean_args(argv: list[str]) -> list[str]:
+    return [arg for arg in argv if arg not in {"--raw-json", "--no-progress"}]
+
+
+def usage() -> None:
+    print(
+        "Supported: ha core|supervisor|host|store|addons|apps|backups ...\n"
+        "This is a Supervisor API shim installed inside the HA Admin MCP app container."
+    )
+
+
+def main() -> int:
+    args = clean_args(sys.argv[1:])
+    if not args or args[0] in {"-h", "--help", "help"}:
+        usage()
+        return 0
+
+    group = args[0]
+    rest = args[1:]
+
+    if group == "core":
+        action = rest[0] if rest else "info"
+        if action == "info":
+            print_json(request("GET", "/core/info"))
+        elif action == "check":
+            print_json(request("POST", "/core/check"))
+        elif action in {"restart", "stop", "start"}:
+            print_json(request("POST", f"/core/{action}"))
+        else:
+            raise SystemExit(f"Unsupported core action: {action}")
+        return 0
+
+    if group == "supervisor":
+        action = rest[0] if rest else "info"
+        if action == "info":
+            print_json(request("GET", "/supervisor/info"))
+        else:
+            raise SystemExit(f"Unsupported supervisor action: {action}")
+        return 0
+
+    if group == "host":
+        action = rest[0] if rest else "info"
+        if action == "info":
+            print_json(request("GET", "/host/info"))
+        else:
+            raise SystemExit(f"Unsupported host action: {action}")
+        return 0
+
+    if group == "store":
+        action = rest[0] if rest else "info"
+        if action == "reload":
+            print_json(request("POST", "/store/reload"))
+        elif action == "info":
+            print_json(request("GET", "/store"))
+        else:
+            raise SystemExit(f"Unsupported store action: {action}")
+        return 0
+
+    if group in {"addons", "addon", "apps", "app"}:
+        if not rest:
+            print_json(request("GET", "/addons"))
+            return 0
+        action = rest[0]
+        if action in {"list", "ls"}:
+            print_json(request("GET", "/addons"))
+            return 0
+        if len(rest) < 2:
+            raise SystemExit(f"App/add-on action requires slug: {action}")
+        slug = rest[1]
+        if action in {"info", "logs"}:
+            print_json(request("GET", f"/addons/{slug}/{action}"))
+        elif action in {"start", "stop", "restart", "rebuild", "update", "install", "uninstall"}:
+            print_json(request("POST", f"/addons/{slug}/{action}"))
+        else:
+            raise SystemExit(f"Unsupported app/add-on action: {action}")
+        return 0
+
+    if group in {"backups", "backup"}:
+        action = rest[0] if rest else "list"
+        if action in {"list", "ls"}:
+            print_json(request("GET", "/backups"))
+        elif action in {"new", "create", "full"}:
+            print_json(request("POST", "/backups/new/full", {}))
+        elif action == "partial":
+            print_json(request("POST", "/backups/new/partial", {}))
+        elif action == "info":
+            if len(rest) < 2:
+                raise SystemExit("backup info requires slug")
+            print_json(request("GET", f"/backups/{rest[1]}/info"))
+        elif action in {"remove", "delete"}:
+            if len(rest) < 2:
+                raise SystemExit("backup remove requires slug")
+            print_json(request("POST", f"/backups/{rest[1]}/remove"))
+        else:
+            raise SystemExit(f"Unsupported backup action: {action}")
+        return 0
+
+    raise SystemExit(f"Unsupported ha command group: {group}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
