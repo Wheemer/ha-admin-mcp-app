@@ -110,6 +110,10 @@ To avoid relaunching the client for every app update, use the stable router tool
 
 Those router names are intended to stay stable so newly added tools can still be used immediately after the app updates.
 
+## Protocol Surface
+
+The app supports the expected MCP server avenues for Codex-style HTTP clients: initialize, tools list/call, resources list/read/templates, prompts list/get, completion, logging level changes, ping, notifications, cursor pagination, and resource subscribe/unsubscribe probes. `mcp_protocol_status` reports the live protocol method coverage and upstream `homeassistant-ai/ha-mcp` tool-name parity.
+
 ## Notes
 
 Dashboard UI changes should prefer the live Lovelace tools or the Home Assistant UI path. Storage-backed Lovelace edits are intentionally warned against because changing `.storage` is not good proof that the rendered UI changed.

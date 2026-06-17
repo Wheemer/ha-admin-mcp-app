@@ -90,7 +90,9 @@ The router tool names are intended to stay stable so newly added tools can still
 
 ## MCP Protocol Surface
 
-The app supports normal MCP discovery and reads for tools, resources, resource templates, prompts, completion, logging level changes, pings, batches, and notifications. Useful resources include HA core/supervisor/host info, states, services, events, config files, storage keys, registries, and Lovelace dashboards/views.
+The app supports normal MCP discovery and reads for tools, resources, resource templates, prompts, completion, logging level changes, pings, batches, notifications, cursor pagination, and resource subscribe/unsubscribe probes. Useful resources include HA core/supervisor/host info, states, services, events, config files, storage keys, registries, and Lovelace dashboards/views.
+
+`mcp_protocol_status` reports the live protocol methods, negotiated endpoint metadata, supported protocol versions, stable router tools, and parity against the default `homeassistant-ai/ha-mcp` tool names.
 
 ## Backup Policy
 

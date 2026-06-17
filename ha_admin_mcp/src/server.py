@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 ADDON_OPTIONS = Path("/data/options.json")
-APP_VERSION = "0.1.42"
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")
@@ -62,6 +61,21 @@ TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+
+
+def read_app_version() -> str:
+    config_file = Path(__file__).resolve().parents[1] / "config.yaml"
+    try:
+        text = config_file.read_text(encoding="utf-8")
+        match = re.search(r"(?m)^version:\s*['\"]?([^'\"\s]+)", text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return os.environ.get("HA_ADMIN_MCP_VERSION", "0.0.0")
+
+
+APP_VERSION = read_app_version()
 
 
 def load_options() -> dict[str, Any]:
@@ -131,6 +145,35 @@ def get_supervisor_token() -> str:
 def text_result(value: Any) -> dict[str, Any]:
     text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
     return {"content": [{"type": "text", "text": text}]}
+
+
+def tool_error_result(message: str, details: Any | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"error": message}
+    if details is not None:
+        payload["details"] = details
+    result = text_result(payload)
+    result["isError"] = True
+    return result
+
+
+def paginated(items: list[dict[str, Any]], params: dict[str, Any], key: str) -> dict[str, Any]:
+    cursor_raw = params.get("cursor")
+    if cursor_raw in (None, ""):
+        start = 0
+    else:
+        try:
+            start = int(str(cursor_raw))
+        except ValueError as err:
+            raise ValueError(f"Invalid cursor: {cursor_raw}") from err
+    if start < 0:
+        raise ValueError("Invalid cursor: cursor must be non-negative")
+    page_size = int(params.get("limit") or params.get("pageSize") or 500)
+    page_size = max(1, min(page_size, 1000))
+    end = start + page_size
+    result: dict[str, Any] = {key: items[start:end]}
+    if end < len(items):
+        result["nextCursor"] = str(end)
+    return result
 
 
 def image_result(data: bytes, mime_type: str = "image/png") -> dict[str, Any]:
@@ -484,6 +527,12 @@ TOOLS = [
         "Alias for call_tool. Call any current MCP tool by name after app updates without reconnecting the MCP client.",
         {"name": {"type": "string"}, "arguments": {"type": "object"}},
         ["name"],
+    ),
+    tool_schema(
+        "mcp_protocol_status",
+        "Return MCP protocol support, endpoint metadata, and upstream Home Assistant MCP tool parity for this app.",
+        {},
+        [],
     ),
     tool_schema(
         "batch_call_tools",
@@ -1830,6 +1879,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_tools(args)
     if name in ("call_tool", "mcp_call_tool"):
         return proxy_call_tool(args, proxy_name=name)
+    if name == "mcp_protocol_status":
+        return mcp_protocol_status()
     if name == "batch_call_tools":
         return batch_call_tools(args)
     if name == "stat_path":
@@ -2314,6 +2365,59 @@ def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
         matches = search_tools(target_name, 10).get("matches", [])
         raise ValueError(f"Unknown tool {target_name!r}. Matching tools: {[match['name'] for match in matches]}")
     return call_tool(target_name, args.get("arguments") or {})
+
+
+def mcp_protocol_status() -> dict[str, Any]:
+    tool_names = {tool["name"] for tool in TOOLS}
+    upstream_names = set(UPSTREAM_HA_MCP_TOOL_NAMES)
+    return {
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
+        "transport": {
+            "kind": "streamable_http_json",
+            "post": True,
+            "get": "405_no_sse_stream",
+            "delete": "202_session_close_ack",
+            "session_header": "Mcp-Session-Id",
+            "protocol_version_header": "MCP-Protocol-Version",
+        },
+        "protocol_versions": sorted(SUPPORTED_PROTOCOL_VERSIONS),
+        "server_capabilities": {
+            "tools": {"listChanged": True, "paginated": True},
+            "resources": {"subscribe": False, "listChanged": True, "paginated": True},
+            "resourceTemplates": {"paginated": True},
+            "prompts": {"listChanged": True, "paginated": True},
+            "completions": True,
+            "logging": True,
+        },
+        "server_methods": [
+            "initialize",
+            "tools/list",
+            "tools/call",
+            "resources/list",
+            "resources/read",
+            "resources/templates/list",
+            "resources/subscribe",
+            "resources/unsubscribe",
+            "prompts/list",
+            "prompts/get",
+            "completion/complete",
+            "logging/setLevel",
+            "ping",
+            "notifications/*",
+        ],
+        "client_feature_methods_not_served": [
+            "roots/list",
+            "sampling/createMessage",
+            "elicitation/create",
+        ],
+        "tool_counts": {
+            "total": len(tool_names),
+            "upstream_homeassistant_ai_expected": len(upstream_names),
+            "upstream_homeassistant_ai_missing": len(upstream_names - tool_names),
+        },
+        "stable_refresh_tools": ["list_tools", "call_tool", "mcp_call_tool", "mcp_protocol_status"],
+        "upstream_homeassistant_ai_missing": sorted(upstream_names - tool_names),
+    }
 
 
 def search_tools(query: str, limit: int) -> dict[str, Any]:
@@ -5295,6 +5399,9 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json({"ok": True, "dangerous": True})
             return
         if is_mcp_path(self.path):
+            if not self.authorized():
+                self.write_json({"error": "unauthorized"}, status=401)
+                return
             self.send_error(405, "SSE streams are not implemented")
             return
         self.send_error(404)
@@ -5305,6 +5412,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.authorized():
             self.write_json({"error": "unauthorized"}, status=401)
+            return
+        protocol_header = self.headers.get("MCP-Protocol-Version")
+        if protocol_header and protocol_header not in SUPPORTED_PROTOCOL_VERSIONS:
+            self.write_json(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": f"Unsupported MCP-Protocol-Version: {protocol_header}"},
+                },
+                status=400,
+            )
             return
         length = int(self.headers.get("Content-Length", "0"))
         try:
@@ -5325,6 +5443,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         if is_mcp_path(self.path):
+            if not self.authorized():
+                self.write_json({"error": "unauthorized"}, status=401)
+                return
             self.send_response(202)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -5358,26 +5479,44 @@ class Handler(BaseHTTPRequestHandler):
                         "tools": {"listChanged": True},
                         "resources": {"subscribe": False, "listChanged": True},
                         "prompts": {"listChanged": True},
+                        "completions": {},
                         "logging": {},
+                    },
+                    "_meta": {
+                        "endpointPath": MCP_PATH,
+                        "port": MCP_PORT,
+                        "dangerous": True,
+                        "supportedProtocolVersions": sorted(SUPPORTED_PROTOCOL_VERSIONS),
                     },
                 }
             elif method == "tools/list":
-                result = {"tools": TOOLS}
+                result = paginated(TOOLS, request.get("params") or {}, "tools")
             elif method == "prompts/list":
-                result = {"prompts": PROMPTS}
+                result = paginated(PROMPTS, request.get("params") or {}, "prompts")
             elif method == "prompts/get":
                 params = request.get("params") or {}
                 result = get_prompt(params["name"], params.get("arguments") or {})
             elif method == "resources/list":
-                result = {"resources": RESOURCES}
+                result = paginated(RESOURCES, request.get("params") or {}, "resources")
             elif method == "resources/read":
                 params = request.get("params") or {}
                 result = read_resource(params["uri"])
             elif method == "resources/templates/list":
-                result = {"resourceTemplates": RESOURCE_TEMPLATES}
+                result = paginated(RESOURCE_TEMPLATES, request.get("params") or {}, "resourceTemplates")
+            elif method in ("resources/subscribe", "resources/unsubscribe"):
+                result = {}
             elif method == "tools/call":
                 params = request.get("params") or {}
-                result = text_result(call_tool(params["name"], params.get("arguments") or {}))
+                tool_name = params.get("name")
+                if not tool_name:
+                    return self.rpc_error(request_id, -32602, "Tool name is required")
+                known_tool_names = {tool["name"] for tool in TOOLS}
+                if tool_name not in known_tool_names:
+                    return self.rpc_error(request_id, -32602, f"Unknown tool: {tool_name}")
+                try:
+                    result = text_result(call_tool(tool_name, params.get("arguments") or {}))
+                except Exception as err:
+                    result = tool_error_result(str(err), {"tool": tool_name})
             elif method == "ping":
                 result = {}
             elif method == "completion/complete":
