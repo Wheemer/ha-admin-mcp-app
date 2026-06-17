@@ -720,10 +720,19 @@ TOOLS = [
     tool_schema("list_automations", "Compatibility tool: list automation entities", {}, []),
     tool_schema("list_automation_configs", "List automation entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_automation_config", "Get compact automation config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("set_automation", "Create or replace a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("update_automation", "Update a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("delete_automation", "Delete a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema("list_script_configs", "List script entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("set_script", "Create or replace a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("update_script", "Update a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("delete_script", "Delete a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema("list_scene_configs", "List scene entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_scene_config", "Get compact scene config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("set_scene", "Create or replace a Home Assistant scene through the live /config/scene/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("update_scene", "Update a Home Assistant scene through the live /config/scene/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("delete_scene", "Delete a Home Assistant scene through the live /config/scene/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema("list_traces", "List Home Assistant automation or script traces through the live WebSocket trace/list API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, ["domain"]),
     tool_schema("get_trace", "Read one Home Assistant automation or script trace by run_id through the live WebSocket trace/get API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "run_id": {"type": "string"}, "latest": {"type": "boolean"}}, ["domain"]),
     tool_schema("list_trace_contexts", "List Home Assistant automation or script trace contexts through the live WebSocket trace/contexts API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}}, ["domain"]),
@@ -1943,14 +1952,26 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_domain_configs("automation", args)
     if name == "get_automation_config":
         return get_domain_config("automation", args)
+    if name in ("set_automation", "update_automation"):
+        return update_config_item("automation", args)
+    if name == "delete_automation":
+        return delete_config_item("automation", args)
     if name == "list_script_configs":
         return list_domain_configs("script", args)
     if name == "get_script_config":
         return get_domain_config("script", args)
+    if name in ("set_script", "update_script"):
+        return update_config_item("script", args)
+    if name == "delete_script":
+        return delete_config_item("script", args)
     if name == "list_scene_configs":
         return list_domain_configs("scene", args)
     if name == "get_scene_config":
         return get_domain_config("scene", args)
+    if name in ("set_scene", "update_scene"):
+        return update_config_item("scene", args)
+    if name == "delete_scene":
+        return delete_config_item("scene", args)
     if name == "list_traces":
         return list_traces(args)
     if name == "get_trace":
@@ -3153,6 +3174,21 @@ def update_config_item(domain: str, args: dict[str, Any]) -> dict[str, Any]:
     if bool(args.get("reload")):
         response["reload"] = ha_request("POST", f"/services/{domain}/reload", {})
     return response
+
+
+def delete_config_item(domain: str, args: dict[str, Any]) -> dict[str, Any]:
+    item_id = config_item_id(domain, args)
+    if not item_id:
+        raise ValueError(f"{domain} id, entity_id, or identifier is required")
+    endpoint = f"/config/{domain}/config/{item_id}"
+    if bool(args.get("dry_run")):
+        current = ha_request("GET", endpoint)
+        return {"domain": domain, "id": item_id, "endpoint": endpoint, "dry_run": True, "current": current}
+    if not bool(args.get("force")):
+        raise ValueError(f"delete_{domain} requires force=true")
+    audit_event(f"delete_{domain}", {"id": item_id})
+    result = ha_request("DELETE", endpoint)
+    return {"domain": domain, "id": item_id, "endpoint": endpoint, "deleted": True, "result": result}
 
 
 def patch_named_registry(registry_key: str, list_name: str, args: dict[str, Any], remove: bool = False) -> dict[str, Any]:
