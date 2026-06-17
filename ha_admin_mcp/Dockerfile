@@ -7,6 +7,7 @@ RUN apk add --no-cache findutils tar
 RUN pip3 install --no-cache-dir fastmcp==3.4.2
 
 COPY src /app/src
+COPY config.yaml /app/config.yaml
 COPY bin/ha /usr/local/bin/ha
 RUN chmod +x /usr/local/bin/ha
 
