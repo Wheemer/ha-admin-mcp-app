@@ -468,6 +468,24 @@ TOOLS = [
         ["query"],
     ),
     tool_schema(
+        "list_tools",
+        "Return this MCP server's current tool catalog. Use after app updates when the MCP client has not refreshed its native tool list.",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "include_schema": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "call_tool",
+        "Call any current MCP tool by name. This stable router lets clients use newly added tools before their native MCP tool list refreshes.",
+        {"name": {"type": "string"}, "arguments": {"type": "object"}},
+        ["name"],
+    ),
+    tool_schema(
+        "mcp_call_tool",
+        "Alias for call_tool. Call any current MCP tool by name after app updates without reconnecting the MCP client.",
+        {"name": {"type": "string"}, "arguments": {"type": "object"}},
+        ["name"],
+    ),
+    tool_schema(
         "batch_call_tools",
         "Call multiple MCP tools sequentially and return compact per-call results",
         {
@@ -1808,6 +1826,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return get_version()
     if name == "search_tools":
         return search_tools(args["query"], int(args.get("limit") or 10))
+    if name == "list_tools":
+        return list_tools(args)
+    if name in ("call_tool", "mcp_call_tool"):
+        return proxy_call_tool(args, proxy_name=name)
     if name == "batch_call_tools":
         return batch_call_tools(args)
     if name == "stat_path":
@@ -2241,8 +2263,8 @@ def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
             tool_name = str(call.get("name") or "")
             if not tool_name:
                 row = {"index": index, "error": "name is required"}
-            elif tool_name == "batch_call_tools":
-                row = {"index": index, "name": tool_name, "error": "batch_call_tools cannot call itself"}
+            elif tool_name in {"batch_call_tools", "call_tool", "mcp_call_tool"}:
+                row = {"index": index, "name": tool_name, "error": "Refusing recursive proxy tool call"}
             else:
                 try:
                     row = {"index": index, "name": tool_name, "result": call_tool(tool_name, call.get("arguments") or {})}
@@ -2254,20 +2276,53 @@ def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
     return {"count": len(results), "results": results}
 
 
+def tool_catalog_row(tool: dict[str, Any], include_schema: bool = False) -> dict[str, Any]:
+    row = {
+        "name": tool["name"],
+        "description": tool.get("description", ""),
+        "required": tool.get("inputSchema", {}).get("required", []),
+        "properties": sorted((tool.get("inputSchema", {}).get("properties") or {}).keys()),
+    }
+    if include_schema:
+        row["inputSchema"] = tool.get("inputSchema", {})
+    return row
+
+
+def list_tools(args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 1000)
+    include_schema = bool(args.get("include_schema"))
+    rows = []
+    for tool in TOOLS:
+        if query and query not in json.dumps(tool, default=str).lower():
+            continue
+        rows.append(tool_catalog_row(tool, include_schema))
+        if len(rows) >= limit:
+            break
+    return {"query": query, "count": len(rows), "total": len(TOOLS), "tools": rows}
+
+
+def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
+    target = args.get("name") or args.get("tool")
+    if not target:
+        raise ValueError("name is required")
+    target_name = str(target)
+    if target_name in {proxy_name, "call_tool", "mcp_call_tool", "batch_call_tools"}:
+        raise ValueError("Refusing recursive proxy tool call")
+    known = {tool["name"] for tool in TOOLS}
+    if target_name not in known:
+        matches = search_tools(target_name, 10).get("matches", [])
+        raise ValueError(f"Unknown tool {target_name!r}. Matching tools: {[match['name'] for match in matches]}")
+    return call_tool(target_name, args.get("arguments") or {})
+
+
 def search_tools(query: str, limit: int) -> dict[str, Any]:
     needle = query.lower()
     rows = []
     for tool in TOOLS:
         haystack = json.dumps(tool, default=str).lower()
         if needle in haystack:
-            rows.append(
-                {
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "required": tool.get("inputSchema", {}).get("required", []),
-                    "properties": sorted((tool.get("inputSchema", {}).get("properties") or {}).keys()),
-                }
-            )
+            rows.append(tool_catalog_row(tool))
             if len(rows) >= limit:
                 break
     return {"query": query, "count": len(rows), "matches": rows}

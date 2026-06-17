@@ -69,6 +69,25 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 - Recorder/database: `sqlite_query`, `recorder_get_db_info`, `recorder_purge`, `recorder_purge_entities`, `get_history_range`, `get_statistics`, `get_statistics_range`, `get_error_log`
 - Backups: `backup_path`, `list_backups`, `create_backup`, `get_backup_info`, `delete_backup`, `restore_backup`
 
+## Tool Refresh Workflow
+
+Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
+
+Use `list_tools` to read the app's current live tool catalog, then use `call_tool` or `mcp_call_tool` to call any current tool by name:
+
+```json
+{
+  "name": "update_automation",
+  "arguments": {
+    "entity_id": "automation.example",
+    "config": {},
+    "dry_run": true
+  }
+}
+```
+
+The router tool names are intended to stay stable so newly added tools can still be used immediately after the app updates.
+
 ## MCP Protocol Surface
 
 The app supports normal MCP discovery and reads for tools, resources, resource templates, prompts, completion, logging level changes, pings, batches, and notifications. Useful resources include HA core/supervisor/host info, states, services, events, config files, storage keys, registries, and Lovelace dashboards/views.

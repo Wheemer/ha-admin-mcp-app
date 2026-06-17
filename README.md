@@ -98,6 +98,18 @@ Backups created by this app are written under:
 
 They are not kept in live `/config` folders.
 
+## Tool Refresh Workflow
+
+Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
+
+To avoid relaunching the client for every app update, use the stable router tools:
+
+- `list_tools`: shows the app's current live tool catalog
+- `call_tool`: calls any current tool by name with an `arguments` object
+- `mcp_call_tool`: alias for `call_tool`
+
+Those router names are intended to stay stable so newly added tools can still be used immediately after the app updates.
+
 ## Notes
 
 Dashboard UI changes should prefer the live Lovelace tools or the Home Assistant UI path. Storage-backed Lovelace edits are intentionally warned against because changing `.storage` is not good proof that the rendered UI changed.
