@@ -5546,9 +5546,9 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def write_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
-        data = json.dumps(payload, default=str).encode()
+        data = json.dumps(payload, default=str, ensure_ascii=True).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         for name, value in (headers or {}).items():
             self.send_header(name, value)
