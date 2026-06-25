@@ -485,6 +485,46 @@ def tool_schema(name: str, description: str, properties: dict[str, Any], require
     }
 
 
+def load_upstream_tool_metadata() -> dict[str, dict[str, Any]]:
+    path = Path(__file__).with_name("upstream_tools.json")
+    if not path.exists():
+        return {}
+    try:
+        items = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    metadata = {}
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            metadata[item["name"]] = item
+    return metadata
+
+
+UPSTREAM_TOOL_METADATA = load_upstream_tool_metadata()
+
+
+def upstream_compat_schema(name: str) -> dict[str, Any]:
+    metadata = UPSTREAM_TOOL_METADATA.get(name)
+    if not metadata:
+        return tool_schema(
+            name,
+            f"homeassistant-ai/ha-mcp compatibility tool for {name}; routed through this app's HA admin APIs",
+            {},
+            [],
+        )
+    schema = {
+        "name": name,
+        "description": metadata.get("description") or f"homeassistant-ai/ha-mcp compatibility tool for {name}",
+        "annotations": tool_annotations(name) | (metadata.get("annotations") or {}),
+        "inputSchema": metadata.get("inputSchema") or {"type": "object", "properties": {}, "required": []},
+    }
+    if metadata.get("tags"):
+        schema["tags"] = metadata["tags"]
+    if metadata.get("source_file"):
+        schema["source_file"] = metadata["source_file"]
+    return schema
+
+
 TOOLS = [
     tool_schema(
         "run_command",
@@ -1760,55 +1800,7 @@ UPSTREAM_HA_MCP_TOOL_NAMES = [
 ]
 
 
-UPSTREAM_COMPAT_TOOL_SCHEMAS = [
-    tool_schema(
-        name,
-        f"homeassistant-ai/ha-mcp compatibility shim for {name}; routed through this app's full-access HA admin primitives",
-        {
-            "entity_id": {"type": "string"},
-            "identifier": {"type": "string"},
-            "id": {"type": "string"},
-            "name": {"type": "string"},
-            "query": {"type": "string"},
-            "domain": {"type": "string"},
-            "service": {"type": "string"},
-            "action": {"type": "string"},
-            "data": {"type": "object"},
-            "config": {"type": "object"},
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "template": {"type": "string"},
-            "slug": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
-            "start_time": {"type": "string"},
-            "end_time": {"type": "string"},
-            "hours": {"type": "integer", "minimum": 1, "maximum": 100000},
-            "period": {"type": "string"},
-            "backup": {"type": "boolean"},
-            "dry_run": {"type": "boolean"},
-            "force": {"type": "boolean"},
-            "expected_hash": {"type": "string"},
-            "event_type": {"type": "string"},
-            "event": {"type": "string"},
-            "url": {"type": "string"},
-            "resource_id": {"type": "string"},
-            "resource": {"type": "object"},
-            "type": {"type": "string"},
-            "operations": {"type": "array", "items": {"type": "object"}},
-            "fields": {"type": "array", "items": {"type": "string"}},
-            "detailed": {"type": "boolean"},
-            "latest": {"type": "boolean"},
-            "include_trace": {"type": "boolean"},
-            "run_id": {"type": "string"},
-            "dashboard_id": {"type": "string"},
-            "arguments": {"type": "object"},
-            "skill": {"type": "string"},
-            "file": {"type": "string"},
-        },
-        [],
-    )
-    for name in UPSTREAM_HA_MCP_TOOL_NAMES
-]
+UPSTREAM_COMPAT_TOOL_SCHEMAS = [upstream_compat_schema(name) for name in UPSTREAM_HA_MCP_TOOL_NAMES]
 
 
 TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
@@ -3366,12 +3358,578 @@ def compat_identifier(args: dict[str, Any]) -> str | None:
     return first_present(args, "entity_id", "identifier", "id", "name", "slug")
 
 
+def ws_result(message: dict[str, Any], timeout: int = 30) -> Any:
+    response = ha_ws_call(message, timeout=timeout)
+    if response.get("success"):
+        return response.get("result")
+    error = response.get("error")
+    if isinstance(error, dict):
+        detail = error.get("message") or error.get("code") or error
+    else:
+        detail = error or response
+    raise RuntimeError(f"Home Assistant WebSocket {message.get('type')} failed: {detail}")
+
+
+def ws_success(message: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+    return {"success": True, "result": ws_result(message, timeout=timeout)}
+
+
+def parse_maybe_json(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("{", "[")):
+            return json.loads(text)
+    return value
+
+
+def parse_string_list(value: Any, name: str) -> list[str] | None:
+    value = parse_maybe_json(value)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",") if part.strip()]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a string list")
+    return value
+
+
+def truthy_arg(args: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if args.get(name) not in (None, ""):
+            return args.get(name)
+    return None
+
+
+def get_entity_registry_entry_ws(entity_id: str) -> dict[str, Any]:
+    entry = ws_result({"type": "config/entity_registry/get", "entity_id": entity_id})
+    return {
+        "entity_id": entry.get("entity_id"),
+        "name": entry.get("name"),
+        "original_name": entry.get("original_name"),
+        "icon": entry.get("icon"),
+        "area_id": entry.get("area_id"),
+        "disabled_by": entry.get("disabled_by"),
+        "hidden_by": entry.get("hidden_by"),
+        "enabled": entry.get("disabled_by") is None,
+        "hidden": entry.get("hidden_by") is not None,
+        "aliases": entry.get("aliases", []),
+        "labels": entry.get("labels", []),
+        "categories": entry.get("categories", {}),
+        "device_class": entry.get("device_class"),
+        "original_device_class": entry.get("original_device_class"),
+        "options": entry.get("options", {}),
+        "platform": entry.get("platform"),
+        "device_id": entry.get("device_id"),
+        "config_entry_id": entry.get("config_entry_id"),
+        "unique_id": entry.get("unique_id"),
+    }
+
+
+def call_entity_registry_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    entity_id = args.get("entity_id") or args.get("identifier") or args.get("id")
+    if name == "ha_get_entity":
+        entity_ids = parse_maybe_json(entity_id)
+        if isinstance(entity_ids, list):
+            entries = []
+            errors = []
+            for eid in entity_ids:
+                try:
+                    entries.append(get_entity_registry_entry_ws(str(eid)))
+                except Exception as err:
+                    errors.append({"entity_id": eid, "error": str(err)})
+            return {"success": not errors, "count": len(entries), "entity_entries": entries, "errors": errors}
+        if not entity_id:
+            raise ValueError("entity_id is required")
+        return {"success": True, "entity_id": entity_id, "entity_entry": get_entity_registry_entry_ws(str(entity_id))}
+    if not entity_id:
+        raise ValueError("entity_id is required")
+    if name == "ha_remove_entity":
+        return ws_success({"type": "config/entity_registry/remove", "entity_id": str(entity_id)})
+
+    message: dict[str, Any] = {"type": "config/entity_registry/update", "entity_id": str(entity_id)}
+    field_map = {
+        "area_id": "area_id",
+        "name": "name",
+        "icon": "icon",
+        "device_class": "device_class",
+        "new_entity_id": "new_entity_id",
+    }
+    for source, target in field_map.items():
+        if source in args:
+            message[target] = args[source] if args[source] != "" else None
+    if "enabled" in args:
+        message["disabled_by"] = None if bool(args["enabled"]) else "user"
+    if "hidden" in args:
+        message["hidden_by"] = "user" if bool(args["hidden"]) else None
+    if "aliases" in args:
+        message["aliases"] = parse_string_list(args.get("aliases"), "aliases") or []
+    if "categories" in args:
+        categories = parse_maybe_json(args.get("categories"))
+        if not isinstance(categories, dict):
+            raise ValueError("categories must be an object")
+        message["categories"] = categories
+    labels = parse_string_list(args.get("labels"), "labels")
+    if labels is not None:
+        operation = str(args.get("label_operation") or "set")
+        if operation in {"add", "remove"}:
+            current = get_entity_registry_entry_ws(str(entity_id)).get("labels", [])
+            if operation == "add":
+                labels = sorted(set(current) | set(labels))
+            else:
+                labels = [label for label in current if label not in set(labels)]
+        message["labels"] = labels
+    if len(message) <= 2:
+        raise ValueError("No entity updates specified")
+    result = ws_result(message)
+    new_entity_id = message.get("new_entity_id") or entity_id
+    if args.get("expose_to") is not None:
+        expose_to = parse_maybe_json(args.get("expose_to"))
+        if not isinstance(expose_to, dict):
+            raise ValueError("expose_to must be an object mapping assistant id to boolean")
+        for should_expose in (True, False):
+            assistants = [assistant for assistant, value in expose_to.items() if bool(value) is should_expose]
+            if assistants:
+                ws_result({"type": "homeassistant/expose_entity", "assistants": assistants, "entity_ids": [new_entity_id], "should_expose": should_expose})
+    return {"success": True, "entity_id": new_entity_id, "entity_entry": result.get("entity_entry", result), "updated": [key for key in message if key not in {"type", "entity_id"}]}
+
+
+def device_registry_summary(device: dict[str, Any], entities: list[dict[str, Any]], detail: str = "summary") -> dict[str, Any]:
+    identifiers = device.get("identifiers", [])
+    connections = device.get("connections", [])
+    integrations = []
+    ieee = None
+    for pair in identifiers + connections:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            domain, value = str(pair[0]), str(pair[1])
+            if domain not in integrations:
+                integrations.append(domain)
+            if domain in {"zha", "ieee"} or (domain == "mqtt" and "_0x" in value):
+                ieee = value if domain != "mqtt" else "0x" + value.split("_0x")[-1]
+    row = {
+        "device_id": device.get("id"),
+        "name": device.get("name_by_user") or device.get("name"),
+        "manufacturer": device.get("manufacturer"),
+        "model": device.get("model"),
+        "sw_version": device.get("sw_version"),
+        "area_id": device.get("area_id"),
+        "integration_sources": integrations,
+        "integration_type": "zigbee2mqtt" if any("zigbee2mqtt" in str(pair).lower() for pair in identifiers) else (integrations[0] if integrations else "unknown"),
+        "via_device_id": device.get("via_device_id"),
+    }
+    if ieee:
+        row["ieee_address"] = ieee
+    if detail == "full":
+        row.update({
+            "entities": entities,
+            "name_by_user": device.get("name_by_user"),
+            "default_name": device.get("name"),
+            "hw_version": device.get("hw_version"),
+            "serial_number": device.get("serial_number"),
+            "disabled_by": device.get("disabled_by"),
+            "labels": device.get("labels", []),
+            "config_entries": device.get("config_entries", []),
+            "connections": connections,
+            "identifiers": identifiers,
+        })
+    return row
+
+
+def call_device_registry_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    device_id = args.get("device_id") or args.get("identifier") or args.get("id")
+    if name == "ha_set_device":
+        if not device_id:
+            raise ValueError("device_id is required")
+        message: dict[str, Any] = {"type": "config/device_registry/update", "device_id": str(device_id)}
+        if "name" in args:
+            message["name_by_user"] = args.get("name") if args.get("name") != "" else None
+        if "area_id" in args:
+            message["area_id"] = args.get("area_id") if args.get("area_id") != "" else None
+        if "disabled_by" in args:
+            message["disabled_by"] = args.get("disabled_by") if args.get("disabled_by") != "" else None
+        labels = parse_string_list(args.get("labels"), "labels")
+        if labels is not None:
+            message["labels"] = labels
+        if len(message) <= 2:
+            raise ValueError("No device updates specified")
+        return {"success": True, "device_id": device_id, "device": ws_result(message)}
+    if name == "ha_remove_device":
+        if not device_id:
+            raise ValueError("device_id is required")
+        return ws_success({"type": "config/device_registry/remove", "device_id": str(device_id)})
+
+    devices = ws_result({"type": "config/device_registry/list"})
+    entities = ws_result({"type": "config/entity_registry/list"})
+    entity_id = args.get("entity_id")
+    if entity_id and not device_id:
+        match = next((entity for entity in entities if entity.get("entity_id") == entity_id), None)
+        device_id = match.get("device_id") if match else None
+    by_device: dict[str, list[dict[str, Any]]] = {}
+    for entity in entities:
+        if entity.get("device_id"):
+            by_device.setdefault(entity["device_id"], []).append({"entity_id": entity.get("entity_id"), "name": entity.get("name") or entity.get("original_name"), "platform": entity.get("platform")})
+    detail = str(args.get("detail_level") or "summary")
+    if device_id:
+        device = next((item for item in devices if item.get("id") == device_id), None)
+        if not device:
+            raise ValueError(f"Device not found: {device_id}")
+        row = device_registry_summary(device, by_device.get(str(device_id), []), "full")
+        return {"success": True, "device": row, "entities": row.get("entities", []), "entity_count": len(row.get("entities", [])), "queried_entity_id": entity_id}
+    limit = int(args.get("limit") or 50)
+    offset = int(args.get("offset") or 0)
+    query = str(args.get("query") or "").lower()
+    integration = str(args.get("integration") or "").lower()
+    area_id = args.get("area_id")
+    manufacturer = str(args.get("manufacturer") or "").lower()
+    rows = []
+    for device in devices:
+        blob = json.dumps(device, default=str).lower()
+        if query and query not in blob:
+            continue
+        if area_id and device.get("area_id") != area_id:
+            continue
+        if manufacturer and manufacturer not in str(device.get("manufacturer") or "").lower():
+            continue
+        row = device_registry_summary(device, by_device.get(device.get("id"), []), detail)
+        if integration and integration not in json.dumps(row.get("integration_sources", []), default=str).lower() and row.get("integration_type") != integration:
+            continue
+        rows.append(row)
+    total = len(rows)
+    return {"success": True, "devices": rows[offset : offset + limit], "count": len(rows[offset : offset + limit]), "total": total, "offset": offset, "limit": limit, "total_devices": len(devices), "detail_level": detail}
+
+
+def call_area_floor_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if name == "ha_list_floors_areas":
+        areas = ws_result({"type": "config/area_registry/list"})
+        floors = ws_result({"type": "config/floor_registry/list"})
+        valid_floor_ids = {floor.get("floor_id") for floor in floors}
+        floor_map = {floor.get("floor_id"): [] for floor in floors}
+        unassigned = []
+        orphaned = []
+        for area in areas:
+            floor_id = area.get("floor_id")
+            if not floor_id:
+                unassigned.append(area)
+            elif floor_id in valid_floor_ids:
+                floor_map.setdefault(floor_id, []).append(area)
+            else:
+                orphaned.append(area)
+        topology = [{**floor, "areas": floor_map.get(floor.get("floor_id"), [])} for floor in floors]
+        topology.sort(key=lambda floor: int(floor.get("level") or 0))
+        return {"success": True, "floor_count": len(floors), "area_count": len(areas), "unassigned_count": len(unassigned), "orphaned_count": len(orphaned), "floors": topology, "unassigned_areas": unassigned, "orphaned_areas": orphaned}
+    kind = args.get("kind") or ("floor" if args.get("floor_id") and not args.get("area_id") else "area")
+    if kind not in {"area", "floor"}:
+        raise ValueError("kind must be area or floor")
+    id_key = "floor_id" if kind == "floor" else "area_id"
+    registry = "floor_registry" if kind == "floor" else "area_registry"
+    item_id = args.get("id") or args.get(id_key) or args.get("identifier")
+    if name == "ha_remove_area_or_floor":
+        if not item_id:
+            raise ValueError("id is required")
+        return ws_success({"type": f"config/{registry}/delete", id_key: item_id})
+    action = "update" if item_id else "create"
+    message: dict[str, Any] = {"type": f"config/{registry}/{action}"}
+    if item_id:
+        message[id_key] = item_id
+    if action == "create" and not args.get("name"):
+        raise ValueError("name is required when creating")
+    for field in ("name", "icon", "aliases", "level", "floor_id", "picture"):
+        if field in args:
+            value = args[field]
+            if field == "aliases":
+                value = parse_string_list(value, "aliases") or []
+            elif value == "":
+                value = None
+            if kind == "floor" and field in {"floor_id", "picture"}:
+                continue
+            if kind == "area" and field == "level":
+                continue
+            message[field] = value
+    return {"success": True, "kind": kind, id_key: item_id, "result": ws_result(message)}
+
+
+def call_label_category_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    is_label = "label" in name
+    registry = "label_registry" if is_label else "category_registry"
+    id_key = "label_id" if is_label else "category_id"
+    item_id = args.get(id_key) or args.get("id") or args.get("identifier")
+    if is_label:
+        list_message = {"type": "config/label_registry/list"}
+    else:
+        list_message = {"type": "config/category_registry/list", "scope": args.get("scope") or "automation"}
+    if "_get_" in name:
+        rows = ws_result(list_message)
+        if item_id:
+            row = next((item for item in rows if item.get(id_key) == item_id), None)
+            if not row:
+                raise ValueError(f"{id_key} not found: {item_id}")
+            return {"success": True, id_key: item_id, "item": row}
+        return {"success": True, "count": len(rows), "items": rows}
+    if "_remove_" in name:
+        if not item_id:
+            raise ValueError(f"{id_key} is required")
+        message = {"type": f"config/{registry}/delete", id_key: item_id}
+        if not is_label:
+            message["scope"] = args.get("scope") or "automation"
+        return ws_success(message)
+    action = "update" if item_id else "create"
+    message = {"type": f"config/{registry}/{action}", "name": args.get("name") or args.get("title")}
+    if not message["name"]:
+        raise ValueError("name is required")
+    if item_id:
+        message[id_key] = item_id
+    for field in ("color", "icon", "description"):
+        if field in args:
+            message[field] = args[field] if args[field] != "" else None
+    if not is_label:
+        message["scope"] = args.get("scope") or "automation"
+    return {"success": True, id_key: item_id, "result": ws_result(message)}
+
+
+def call_blueprint_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if name == "ha_import_blueprint":
+        url = args.get("url")
+        if not url:
+            raise ValueError("url is required")
+        imported = ws_result({"type": "blueprint/import", "url": url}, timeout=120)
+        filename = imported.get("suggested_filename")
+        raw = imported.get("raw_data")
+        metadata = (imported.get("blueprint") or {}).get("metadata") or {}
+        domain = metadata.get("domain") or args.get("domain") or "automation"
+        if not filename or not raw:
+            raise ValueError("Blueprint import validated but did not return suggested_filename/raw_data")
+        if not str(filename).endswith((".yaml", ".yml")):
+            filename = f"{filename}.yaml"
+        saved = ws_result({"type": "blueprint/save", "domain": domain, "path": filename, "yaml": raw, "source_url": url}, timeout=120)
+        return {"success": True, "url": url, "imported_blueprint": {"path": filename, "domain": domain, "name": metadata.get("name"), "description": metadata.get("description")}, "save_result": saved}
+    domain = args.get("domain") or "automation"
+    path = args.get("path")
+    blueprints = ws_result({"type": "blueprint/list", "domain": domain})
+    if not path:
+        rows = [{"path": key, "name": value.get("name") or ((value.get("metadata") or {}).get("name")), "domain": domain, "metadata": value.get("metadata")} for key, value in blueprints.items()]
+        return {"success": True, "domain": domain, "count": len(rows), "blueprints": rows}
+    if path not in blueprints:
+        raise ValueError(f"Blueprint not found: {path}")
+    data = blueprints[path]
+    return {"success": True, "path": path, "domain": domain, "name": data.get("name") or path, "metadata": data.get("metadata"), "inputs": (data.get("metadata") or {}).get("input"), "blueprint": data.get("blueprint")}
+
+
+def call_calendar_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    entity_id = args.get("entity_id") or args.get("calendar_entity_id") or args.get("identifier")
+    if not entity_id:
+        raise ValueError("entity_id is required")
+    if name == "ha_config_get_calendar_events":
+        start = args.get("start") or datetime.now().isoformat()
+        end = args.get("end") or (datetime.now() + timedelta(days=7)).isoformat()
+        events = ha_request("GET", maybe_query(f"/calendars/{entity_id}", {"start": start, "end": end}))
+        limit = int(args.get("max_results") or args.get("limit") or 20)
+        return {"success": True, "entity_id": entity_id, "events": events[:limit] if isinstance(events, list) else events, "count": min(len(events), limit) if isinstance(events, list) else None, "time_range": {"start": start, "end": end}}
+    if name == "ha_config_set_calendar_event":
+        summary = args.get("summary") or args.get("name")
+        start = args.get("start")
+        end = args.get("end")
+        if not summary or not start or not end:
+            raise ValueError("summary, start, and end are required")
+        if args.get("rrule"):
+            event = {"summary": summary, "dtstart": start, "dtend": end, "rrule": args.get("rrule")}
+            for field in ("description", "location"):
+                if args.get(field):
+                    event[field] = args[field]
+            return ws_success({"type": "calendar/event/create", "entity_id": entity_id, "event": event})
+        data = {"entity_id": entity_id, "summary": summary, "start_date_time": start, "end_date_time": end}
+        for field in ("description", "location"):
+            if args.get(field):
+                data[field] = args[field]
+        return {"success": True, "result": ha_request("POST", "/services/calendar/create_event", data), "event": data}
+    uid = args.get("uid")
+    if not uid:
+        raise ValueError("uid is required")
+    message = {"type": "calendar/event/delete", "entity_id": entity_id, "uid": uid}
+    for field in ("recurrence_id", "recurrence_range"):
+        if args.get(field):
+            message[field] = args[field]
+    return ws_success(message)
+
+
+def call_group_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if name == "ha_config_list_groups":
+        groups = []
+        for state in ha_request("GET", "/states"):
+            entity_id = state.get("entity_id", "")
+            if entity_id.startswith("group."):
+                attrs = state.get("attributes") or {}
+                groups.append({"entity_id": entity_id, "object_id": entity_id.removeprefix("group."), "state": state.get("state"), "friendly_name": attrs.get("friendly_name"), "icon": attrs.get("icon"), "entity_ids": attrs.get("entity_id", []), "all": attrs.get("all", False)})
+        return {"success": True, "count": len(groups), "groups": sorted(groups, key=lambda row: row.get("friendly_name") or row.get("entity_id"))}
+    object_id = args.get("object_id") or args.get("id") or args.get("identifier")
+    if not object_id:
+        raise ValueError("object_id is required")
+    object_id = str(object_id).removeprefix("group.")
+    if name == "ha_config_remove_group":
+        return {"success": True, "entity_id": f"group.{object_id}", "result": ha_request("POST", "/services/group/remove", {"object_id": object_id})}
+    data = {"object_id": object_id}
+    if args.get("name"):
+        data["name"] = args["name"]
+    if args.get("icon"):
+        data["icon"] = args["icon"]
+    if "all_on" in args:
+        data["all"] = bool(args["all_on"])
+    for source, target in (("entities", "entities"), ("add_entities", "add_entities"), ("remove_entities", "remove_entities")):
+        values = parse_string_list(args.get(source), source)
+        if values is not None:
+            data[target] = values
+    return {"success": True, "entity_id": f"group.{object_id}", "result": ha_request("POST", "/services/group/set", data), "updated_fields": [key for key in data if key != "object_id"]}
+
+
+def call_helper_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    if name == "ha_config_list_helpers":
+        helper_type = args.get("helper_type") or args.get("type") or args.get("domain")
+        domains = [helper_type] if helper_type else ["input_button", "input_boolean", "input_select", "input_number", "input_text", "input_datetime", "counter", "timer", "schedule", "zone", "person", "tag"]
+        entities = []
+        for domain in domains:
+            entities.extend(list_entities({"domain": domain, "detailed": True, "limit": 10000}).get("entities", []))
+        return {"success": True, "count": len(entities), "helpers": entities, "helper_type": helper_type}
+    if name == "ha_remove_helpers_integrations":
+        entity_id = args.get("entity_id") or args.get("helper_id") or args.get("id") or args.get("identifier")
+        if not entity_id:
+            raise ValueError("entity_id/helper_id is required")
+        if "." not in str(entity_id) and args.get("helper_type"):
+            entity_id = f"{args['helper_type']}.{entity_id}"
+        return call_entity_registry_tool("ha_remove_entity", {"entity_id": entity_id})
+    helper_type = args.get("helper_type") or args.get("type")
+    if not helper_type:
+        raise ValueError("helper_type is required")
+    action = args.get("action") or ("update" if args.get("helper_id") or args.get("id") else "create")
+    message: dict[str, Any] = {"type": f"{helper_type}/{action}"}
+    helper_id = args.get("helper_id") or args.get("id")
+    if helper_id:
+        message[f"{helper_type}_id"] = str(helper_id).removeprefix(f"{helper_type}.")
+    for key, value in (args.get("config") or {}).items():
+        message[key] = value
+    for key in ("name", "icon", "initial", "min", "max", "min_value", "max_value", "step", "unit_of_measurement", "mode", "has_date", "has_time", "duration", "restore", "latitude", "longitude", "radius", "passive"):
+        if key in args:
+            message[key] = args[key]
+    for key in ("options", "labels", "device_trackers"):
+        values = parse_string_list(args.get(key), key)
+        if values is not None:
+            message[key] = values
+    return {"success": True, "helper_type": helper_type, "action": action, "result": ws_result(message)}
+
+
+def call_energy_tool(args: dict[str, Any]) -> dict[str, Any]:
+    mode = args.get("mode") or args.get("action") or "get"
+    current = ws_result({"type": "energy/get_prefs"})
+    current_hash = compute_config_hash(current)
+    if mode == "get":
+        per_key = {key: compute_config_hash(value) for key, value in current.items() if key in {"energy_sources", "device_consumption", "device_consumption_water"}}
+        return {"success": True, "config": current, "config_hash": current_hash, "config_hash_per_key": per_key}
+    config = args.get("config")
+    if mode == "add_device":
+        key = "device_consumption_water" if args.get("water") else "device_consumption"
+        config = {key: list(current.get(key) or [])}
+        stat = args.get("stat_consumption")
+        if not stat:
+            raise ValueError("stat_consumption is required")
+        entry = {"stat_consumption": stat}
+        if args.get("name"):
+            entry["name"] = args["name"]
+        if args.get("included_in_stat"):
+            entry["included_in_stat"] = args["included_in_stat"]
+        config[key].append(entry)
+    elif mode == "remove_device":
+        key = "device_consumption_water" if args.get("water") else "device_consumption"
+        stat = args.get("stat_consumption")
+        if not stat:
+            raise ValueError("stat_consumption is required")
+        config = {key: [entry for entry in current.get(key, []) if entry.get("stat_consumption") != stat]}
+    elif mode == "add_source":
+        source = parse_maybe_json(args.get("source"))
+        if not isinstance(source, dict):
+            raise ValueError("source object is required")
+        config = {"energy_sources": list(current.get("energy_sources") or []) + [source]}
+    elif mode != "set":
+        raise ValueError("mode must be get, set, add_device, remove_device, or add_source")
+    if not isinstance(config, dict):
+        raise ValueError("config object is required")
+    if args.get("dry_run"):
+        return {"success": True, "dry_run": True, "current_config_hash": current_hash, "would_save": config}
+    expected = args.get("config_hash")
+    if mode == "set" and expected and isinstance(expected, str) and expected != current_hash:
+        raise ValueError(f"config_hash mismatch: current={current_hash}")
+    return {"success": True, "result": ws_result({"type": "energy/save_prefs", **config}), "saved_keys": sorted(config), "previous_config_hash": current_hash}
+
+
+def call_zone_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    zone_id = args.get("zone_id") or args.get("id") or args.get("identifier")
+    if name == "ha_get_zone":
+        zones = ws_result({"type": "zone/list"})
+        if not zone_id:
+            return {"success": True, "count": len(zones), "zones": zones}
+        zone = next((item for item in zones if item.get("id") == zone_id), None)
+        if not zone:
+            raise ValueError(f"Zone not found: {zone_id}")
+        return {"success": True, "zone_id": zone_id, "zone": zone}
+    if name == "ha_remove_zone":
+        if not zone_id:
+            raise ValueError("zone_id is required")
+        return ws_success({"type": "zone/delete", "zone_id": zone_id})
+    action = "update" if zone_id else "create"
+    if action == "create":
+        for required in ("name", "latitude", "longitude"):
+            if args.get(required) is None:
+                raise ValueError(f"{required} is required when creating a zone")
+    message: dict[str, Any] = {"type": f"zone/{action}"}
+    if zone_id:
+        message["zone_id"] = zone_id
+    for field in ("name", "latitude", "longitude", "radius", "icon", "passive"):
+        if field in args and args[field] is not None:
+            message[field] = args[field]
+    if action == "create" and "radius" not in message:
+        message["radius"] = 100
+    result = ws_result(message)
+    return {"success": True, "zone_id": result.get("id", zone_id), "zone_data": result, "action": action}
+
+
+def call_pipeline_tool(args: dict[str, Any]) -> dict[str, Any]:
+    action = args.get("action") or "list"
+    if action == "list":
+        return {"success": True, "result": ws_result({"type": "assist_pipeline/pipeline/list"})}
+    pipeline_id = args.get("pipeline_id") or args.get("id") or args.get("identifier")
+    if action == "get":
+        result = ws_result({"type": "assist_pipeline/pipeline/list"})
+        pipelines = result.get("pipelines", []) if isinstance(result, dict) else []
+        if pipeline_id == "preferred":
+            pipeline_id = result.get("preferred_pipeline")
+        match = next((pipeline for pipeline in pipelines if pipeline.get("id") == pipeline_id), None)
+        if not match:
+            raise ValueError(f"Pipeline not found: {pipeline_id}")
+        return {"success": True, "pipeline": match, "preferred_pipeline": result.get("preferred_pipeline")}
+    if action == "set_preferred":
+        if not pipeline_id:
+            raise ValueError("pipeline_id is required")
+        return ws_success({"type": "assist_pipeline/pipeline/set_preferred", "pipeline": pipeline_id})
+    message = {"type": f"assist_pipeline/pipeline/{action}"}
+    if pipeline_id:
+        message["pipeline"] = pipeline_id
+    if args.get("base_pipeline_id"):
+        message["copy_from"] = args["base_pipeline_id"]
+    for field in ("name", "conversation_engine", "conversation_language", "language", "stt_engine", "stt_language", "tts_engine", "tts_language", "tts_voice", "wake_word_entity", "wake_word_id", "prefer_local_intents"):
+        if field in args:
+            message[field] = args[field] if args[field] != "" else None
+    result = ws_result(message)
+    if args.get("make_preferred"):
+        new_id = result.get("id") or result.get("pipeline") or pipeline_id
+        if new_id:
+            ws_result({"type": "assist_pipeline/pipeline/set_preferred", "pipeline": new_id})
+    return {"success": True, "action": action, "result": result}
+
+
 def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
     identifier = compat_identifier(args)
-    if name in ("ha_get_state", "ha_get_entity"):
+    if name == "ha_get_state":
         if not identifier:
             raise ValueError("entity_id or identifier is required")
         return get_entity({"entity_id": identifier, "fields": args.get("fields"), "detailed": bool(args.get("detailed", True))})
+    if name in ("ha_get_entity", "ha_set_entity", "ha_remove_entity"):
+        return call_entity_registry_tool(name, args)
     if name == "ha_search":
         query = str(args.get("query") or "")
         return {"entities": search_entities(query, int(args.get("limit") or 20)), "tools": search_tools(query, 10)}
@@ -3584,33 +4142,21 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             resources["data"]["items"] = [old for old in resources["data"]["items"] if old.get("id") != item.get("id") and old.get("url") != item.get("url")]
             resources["data"]["items"].append(item)
         return dump_storage_json("lovelace_resources", resources)
-    if name == "ha_get_device":
-        if identifier:
-            return search_device_registry({"id": identifier, "query": identifier, "limit": 20})
-        return search_device_registry({"query": args.get("query") or "", "limit": int(args.get("limit") or 20)})
-    if name in ("ha_set_device", "ha_remove_device"):
-        return {"note": "Use search_device_registry plus patch_storage_json_path on core.device_registry for exact device registry edits.", "args": args}
+    if name in ("ha_get_device", "ha_set_device", "ha_remove_device"):
+        return call_device_registry_tool(name, args)
     if name in ("ha_get_integration", "ha_set_integration_enabled"):
-        domain = args.get("domain") or identifier
         if name == "ha_get_integration":
+            domain = args.get("domain") or identifier
             return search_config_entries({"domain": domain, "query": args.get("query"), "limit": int(args.get("limit") or 20)})
-        return {"note": "Integration enable/disable is available through raw storage/API tools; refusing to guess config-entry mutation shape.", "matching_entries": search_config_entries({"domain": domain, "limit": 20})}
+        entry_id = args.get("entry_id") or args.get("id") or args.get("identifier")
+        if not entry_id:
+            raise ValueError("entry_id is required")
+        result = ws_result({"type": "config_entries/disable", "entry_id": entry_id, "disabled_by": None if bool(args.get("enabled")) else "user"})
+        return {"success": True, "entry_id": entry_id, "enabled": bool(args.get("enabled")), "require_restart": (result or {}).get("require_restart", False), "result": result}
     if name in ("ha_list_floors_areas", "ha_set_area_or_floor", "ha_remove_area_or_floor"):
-        if name == "ha_list_floors_areas":
-            return {
-                "areas": search_named_registry("core.area_registry", "areas", {"limit": 10000}),
-                "floors": search_named_registry("core.floor_registry", "floors", {"limit": 10000}),
-            }
-        registry_key = "core.floor_registry" if args.get("kind") == "floor" else "core.area_registry"
-        list_name = "floors" if args.get("kind") == "floor" else "areas"
-        return patch_named_registry(registry_key, list_name, args, remove=name.startswith("ha_remove"))
+        return call_area_floor_tool(name, args)
     if name in ("ha_config_get_label", "ha_config_set_label", "ha_config_remove_label", "ha_config_get_category", "ha_config_set_category", "ha_config_remove_category"):
-        is_label = "label" in name
-        registry_key = "core.label_registry" if is_label else "core.category_registry"
-        list_name = "labels" if is_label else "categories"
-        if "_get_" in name:
-            return search_named_registry(registry_key, list_name, {"id": identifier, "name": args.get("name"), "query": args.get("query"), "limit": int(args.get("limit") or 20)})
-        return patch_named_registry(registry_key, list_name, args, remove="_remove_" in name)
+        return call_label_category_tool(name, args)
     if name in ("ha_config_get_automation", "ha_config_get_script", "ha_config_get_scene"):
         domain = {"ha_config_get_automation": "automation", "ha_config_get_script": "script", "ha_config_get_scene": "scene"}[name]
         item_id = config_item_id(domain, args)
@@ -3639,7 +4185,7 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
     if name in ("ha_get_hacs_info", "ha_manage_hacs"):
         return {"note": "HACS can be controlled through ha_api/supervisor_api/http_request; no dedicated HACS REST contract is assumed.", "hacs_entries": search_config_entries({"domain": "hacs", "limit": 20})}
     if name in ("ha_get_zone", "ha_remove_zone", "ha_set_zone"):
-        return ha_request("GET", "/states/zone") if name == "ha_get_zone" and not identifier else {"note": "Use storage/API primitives for zone mutation.", "args": args}
+        return call_zone_tool(name, args)
     if name in ("ha_get_todo", "ha_remove_todo_item", "ha_set_todo_item"):
         if name == "ha_get_todo":
             return ha_request("GET", f"/states/{identifier}") if identifier else list_entities({"domain": "todo", "detailed": True, "limit": 10000})
@@ -3653,10 +4199,37 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         return {"themes": search_files({"path": str(CONFIG_ROOT), "filename": "*.yaml", "query": args.get("query") or "frontend:", "recursive": True, "limit": int(args.get("limit") or 50)})}
     if name == "ha_report_issue":
         return {"title": args.get("title"), "body": args.get("body") or args.get("content"), "system_overview": system_overview()}
-    if name in ("ha_install_mcp_tools", "ha_manage_pipeline", "ha_manage_energy_prefs", "ha_config_list_groups", "ha_config_set_group", "ha_config_remove_group", "ha_config_list_helpers", "ha_config_set_helper", "ha_remove_helpers_integrations", "ha_get_blueprint", "ha_import_blueprint", "ha_config_get_calendar_events", "ha_config_set_calendar_event", "ha_config_remove_calendar_event", "ha_get_dashboard_screenshot", "ha_manage_custom_tool", "ha_get_entity_exposure", "ha_set_entity", "ha_remove_entity"):
+    if name == "ha_manage_pipeline":
+        return call_pipeline_tool(args)
+    if name == "ha_manage_energy_prefs":
+        return call_energy_tool(args)
+    if name in ("ha_config_list_groups", "ha_config_set_group", "ha_config_remove_group"):
+        return call_group_tool(name, args)
+    if name in ("ha_config_list_helpers", "ha_config_set_helper", "ha_remove_helpers_integrations"):
+        return call_helper_tool(name, args)
+    if name in ("ha_get_blueprint", "ha_import_blueprint"):
+        return call_blueprint_tool(name, args)
+    if name in ("ha_config_get_calendar_events", "ha_config_set_calendar_event", "ha_config_remove_calendar_event"):
+        return call_calendar_tool(name, args)
+    if name == "ha_get_entity_exposure":
+        exposed = ws_result({"type": "homeassistant/expose_entity/list"}).get("exposed_entities", {})
+        assistant = args.get("assistant")
+        entity_id = args.get("entity_id") or identifier
+        if entity_id:
+            settings = exposed.get(entity_id, {})
+            return {"success": True, "entity_id": entity_id, "exposed_to": settings, "is_exposed_anywhere": any(settings.values()), "has_custom_settings": entity_id in exposed}
+        if assistant:
+            exposed = {eid: settings for eid, settings in exposed.items() if settings.get(assistant)}
+        return {"success": True, "exposed_entities": exposed, "count": len(exposed), "filters_applied": {"assistant": assistant} if assistant else {}}
+    if name == "ha_get_dashboard_screenshot":
+        return {"note": "Dashboard screenshot capture requires the upstream Playwright sidecar; use this Admin App's live Lovelace read/write tools for dashboard verification in this add-on.", "recommended_tools": ["live_lovelace_get_outline", "live_lovelace_find_cards", "live_lovelace_save_config"], "args": args}
+    if name == "ha_manage_custom_tool":
+        return {"success": True, "managed_tools": search_tools(str(args.get("query") or "custom"), int(args.get("limit") or 20)), "note": "Custom tool package management is exposed through Admin App file/run primitives; this response lists available tool surfaces."}
+    if name == "ha_install_mcp_tools":
         return {
-            "note": "Compatibility shim present. Use this app's full-access primitives for exact execution when this high-level upstream workflow needs HA-specific payload details.",
-            "recommended_tools": ["ha_api", "supervisor_api", "http_request", "read_storage_json_path", "patch_storage_json_path", "run_command"],
+            "success": True,
+            "note": "This Admin App add-on already includes the MCP tool surface directly. For HACS upstream component installation, use ha_manage_hacs or supervisor/file tools with explicit approval.",
+            "recommended_tools": ["ha_get_hacs_info", "ha_manage_hacs", "supervisor_api", "run_command"],
             "args": args,
         }
     raise ValueError(f"Unhandled upstream compatibility tool: {name}")
