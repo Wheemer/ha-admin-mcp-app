@@ -61,6 +61,19 @@ TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
+REGISTRY_DEFINITIONS = {
+    "entity": {"key": "core.entity_registry", "list": "entities", "selectors": ["entity_id", "unique_id", "id"]},
+    "device": {"key": "core.device_registry", "list": "devices", "selectors": ["id", "name", "name_by_user"]},
+    "area": {"key": "core.area_registry", "list": "areas", "selectors": ["id", "name"]},
+    "floor": {"key": "core.floor_registry", "list": "floors", "selectors": ["id", "name"]},
+    "label": {"key": "core.label_registry", "list": "labels", "selectors": ["id", "name"]},
+    "category": {"key": "core.category_registry", "list": "categories", "selectors": ["id", "name", "scope"]},
+    "config_entry": {"key": "core.config_entries", "list": "entries", "selectors": ["entry_id", "domain", "title", "source"]},
+    "issue": {"key": "repairs.issue_registry", "list": "issues", "selectors": ["issue_id", "domain", "translation_key"]},
+}
+REGISTRY_KEY_ALIASES = {
+    definition["key"]: name for name, definition in REGISTRY_DEFINITIONS.items()
+}
 
 
 def read_app_version() -> str:
@@ -1094,6 +1107,120 @@ TOOLS = [
         },
         ["key", "path"],
     ),
+    tool_schema("list_registries", "List known Home Assistant registries exposed by the Admin App", {"include_counts": {"type": "boolean"}}, []),
+    tool_schema(
+        "read_registry",
+        "Read one Home Assistant registry by registry name or storage key",
+        {"registry": {"type": "string"}, "key": {"type": "string"}, "include_entries": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100000}},
+        [],
+    ),
+    tool_schema(
+        "search_registry",
+        "Search any known Home Assistant registry with exact filters plus text query",
+        {
+            "registry": {"type": "string"},
+            "key": {"type": "string"},
+            "filters": {"type": "object"},
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+        },
+        [],
+    ),
+    tool_schema(
+        "get_registry_entry",
+        "Get exactly one registry entry by registry name/key and selectors or query",
+        {
+            "registry": {"type": "string"},
+            "key": {"type": "string"},
+            "id": {"type": "string"},
+            "entity_id": {"type": "string"},
+            "unique_id": {"type": "string"},
+            "entry_id": {"type": "string"},
+            "name": {"type": "string"},
+            "domain": {"type": "string"},
+            "title": {"type": "string"},
+            "query": {"type": "string"},
+        },
+        [],
+    ),
+    tool_schema(
+        "create_registry_entry",
+        "Append one entry to a Home Assistant registry, or upsert when upsert=true",
+        {
+            "registry": {"type": "string"},
+            "key": {"type": "string"},
+            "entry": {"type": "object"},
+            "upsert": {"type": "boolean"},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        ["entry"],
+    ),
+    tool_schema(
+        "replace_registry_entry",
+        "Replace exactly one Home Assistant registry entry with a full object",
+        {
+            "registry": {"type": "string"},
+            "key": {"type": "string"},
+            "entry": {"type": "object"},
+            "id": {"type": "string"},
+            "entity_id": {"type": "string"},
+            "unique_id": {"type": "string"},
+            "entry_id": {"type": "string"},
+            "name": {"type": "string"},
+            "domain": {"type": "string"},
+            "title": {"type": "string"},
+            "query": {"type": "string"},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        ["entry"],
+    ),
+    tool_schema(
+        "patch_registry_entry",
+        "Patch exactly one Home Assistant registry entry with dry-run, backup, and expected_hash support",
+        {
+            "registry": {"type": "string"},
+            "key": {"type": "string"},
+            "id": {"type": "string"},
+            "entity_id": {"type": "string"},
+            "unique_id": {"type": "string"},
+            "entry_id": {"type": "string"},
+            "name": {"type": "string"},
+            "domain": {"type": "string"},
+            "title": {"type": "string"},
+            "query": {"type": "string"},
+            "patch": {"type": "object"},
+            "remove_keys": {"type": "array", "items": {"type": "string"}},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        [],
+    ),
+    tool_schema(
+        "delete_registry_entry",
+        "Delete exactly one Home Assistant registry entry; requires force=true unless dry_run=true",
+        {
+            "registry": {"type": "string"},
+            "key": {"type": "string"},
+            "id": {"type": "string"},
+            "entity_id": {"type": "string"},
+            "unique_id": {"type": "string"},
+            "entry_id": {"type": "string"},
+            "name": {"type": "string"},
+            "domain": {"type": "string"},
+            "title": {"type": "string"},
+            "query": {"type": "string"},
+            "force": {"type": "boolean"},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "expected_hash": {"type": "string"},
+        },
+        [],
+    ),
     tool_schema(
         "search_entity_registry",
         "Filter core.entity_registry without returning the whole registry",
@@ -1159,6 +1286,12 @@ TOOLS = [
         "search_label_registry",
         "Filter core.label_registry without returning the whole file",
         {"id": {"type": "string"}, "name": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
+        "search_category_registry",
+        "Filter core.category_registry without returning the whole file",
+        {"id": {"type": "string"}, "name": {"type": "string"}, "scope": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
         [],
     ),
     tool_schema("get_config_entry", "Get exactly one core.config_entries entry by entry_id, domain/title query, or source", {"entry_id": {"type": "string"}, "domain": {"type": "string"}, "title": {"type": "string"}, "source": {"type": "string"}, "query": {"type": "string"}}, []),
@@ -2166,6 +2299,22 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return read_storage_json_paths(args["key"], args["paths"])
     if name == "patch_storage_json_path":
         return patch_storage_json_path(args)
+    if name == "list_registries":
+        return list_registries(bool(args.get("include_counts")))
+    if name == "read_registry":
+        return read_registry(args)
+    if name == "search_registry":
+        return search_registry(args)
+    if name == "get_registry_entry":
+        return get_registry_entry(args)
+    if name == "create_registry_entry":
+        return create_registry_entry(args)
+    if name == "replace_registry_entry":
+        return replace_registry_entry(args)
+    if name == "patch_registry_entry":
+        return patch_any_registry_entry(args)
+    if name == "delete_registry_entry":
+        return delete_registry_entry(args)
     if name == "search_entity_registry":
         return search_entity_registry(args)
     if name == "get_entity_registry_entry":
@@ -2184,6 +2333,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return search_named_registry("core.floor_registry", "floors", args)
     if name == "search_label_registry":
         return search_named_registry("core.label_registry", "labels", args)
+    if name == "search_category_registry":
+        return search_named_registry("core.category_registry", "categories", args)
     if name == "patch_entity_registry_entry":
         return patch_registry_entry("core.entity_registry", "entities", args, ["entity_id", "unique_id", "id"])
     if name == "patch_device_registry_entry":
@@ -4068,6 +4219,244 @@ def patch_storage_json_path(args: dict[str, Any]) -> dict[str, Any]:
     return {"key": key, "path": path, "before": before, "after": after, "backup": backup, "storage": info}
 
 
+def registry_definition(args: dict[str, Any]) -> dict[str, Any]:
+    raw = str(args.get("registry") or args.get("key") or "").strip()
+    if not raw:
+        raise ValueError("registry or key is required")
+    normalized = raw.removeprefix("core.").replace("-", "_")
+    aliases = {
+        "entities": "entity",
+        "entity_registry": "entity",
+        "device_registry": "device",
+        "devices": "device",
+        "areas": "area",
+        "area_registry": "area",
+        "floors": "floor",
+        "floor_registry": "floor",
+        "labels": "label",
+        "label_registry": "label",
+        "categories": "category",
+        "category_registry": "category",
+        "config_entries": "config_entry",
+        "config_entry_registry": "config_entry",
+        "issues": "issue",
+        "issue_registry": "issue",
+        "repairs.issue_registry": "issue",
+    }
+    name = aliases.get(normalized, normalized)
+    if raw in REGISTRY_KEY_ALIASES:
+        name = REGISTRY_KEY_ALIASES[raw]
+    if name not in REGISTRY_DEFINITIONS:
+        known = sorted(REGISTRY_DEFINITIONS) + sorted(REGISTRY_KEY_ALIASES)
+        raise ValueError(f"Unknown registry: {raw}. Known registries: {', '.join(known)}")
+    definition = dict(REGISTRY_DEFINITIONS[name])
+    definition["name"] = name
+    return definition
+
+
+def registry_rows(definition: dict[str, Any], data: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = data.setdefault("data", {}).setdefault(str(definition["list"]), [])
+    if not isinstance(rows, list):
+        raise ValueError(f"{definition['key']} data.{definition['list']} is not a list")
+    return rows
+
+
+def list_registries(include_counts: bool = False) -> dict[str, Any]:
+    registries = []
+    for name, definition in REGISTRY_DEFINITIONS.items():
+        row = {"name": name, **definition, "path": str(storage_path(definition["key"])), "exists": storage_path(definition["key"]).exists()}
+        if include_counts:
+            try:
+                row["count"] = len(load_storage_json(definition["key"]).get("data", {}).get(definition["list"], []))
+            except Exception as err:
+                row["count_error"] = str(err)
+        registries.append(row)
+    return {"count": len(registries), "registries": registries}
+
+
+def read_registry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    limit = int(args.get("limit") or 100)
+    result = {
+        "registry": definition["name"],
+        "key": definition["key"],
+        "list": definition["list"],
+        "path": str(storage_path(definition["key"])),
+        "count": len(rows),
+        "current_hash": path_hash(storage_path(definition["key"])),
+        "version": data.get("version"),
+        "minor_version": data.get("minor_version"),
+    }
+    if bool(args.get("include_entries")):
+        result["entries"] = rows[:limit]
+        result["truncated"] = len(rows) > limit
+    return result
+
+
+def registry_entry_matches(row: dict[str, Any], filters: dict[str, Any], query: str = "") -> bool:
+    for key_name, wanted in filters.items():
+        if wanted is None:
+            continue
+        if str(row.get(str(key_name)) or "") != str(wanted):
+            return False
+    return not query or contains_text(row, query)
+
+
+def registry_selector_filters(definition: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    filters = {}
+    for selector in definition["selectors"]:
+        if args.get(selector) is not None:
+            filters[selector] = args[selector]
+    return filters
+
+
+def search_registry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    filters = args.get("filters") or {}
+    if not isinstance(filters, dict):
+        raise ValueError("filters must be an object")
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 100)
+    matches = []
+    for row in rows:
+        if len(matches) >= limit:
+            break
+        if registry_entry_matches(row, filters, query):
+            matches.append(row)
+    return {"registry": definition["name"], "key": definition["key"], "list": definition["list"], "count": len(matches), "matches": matches}
+
+
+def find_registry_entries(definition: dict[str, Any], args: dict[str, Any], rows: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+    filters = registry_selector_filters(definition, args)
+    query = str(args.get("query") or "").lower()
+    if not filters and not query:
+        raise ValueError("At least one selector or query is required")
+    matches = []
+    for index, row in enumerate(rows):
+        if registry_entry_matches(row, filters, query):
+            matches.append((index, row))
+    return matches
+
+
+def get_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    matches = find_registry_entries(definition, args, rows)
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one {definition['key']} match, found {len(matches)}")
+    index, entry = matches[0]
+    return {"registry": definition["name"], "key": definition["key"], "list": definition["list"], "index": index, "entry": entry}
+
+
+def duplicate_registry_matches(definition: dict[str, Any], entry: dict[str, Any], rows: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+    selectors = {selector: entry.get(selector) for selector in definition["selectors"] if entry.get(selector) is not None}
+    if not selectors:
+        raise ValueError(f"entry must include one of: {', '.join(definition['selectors'])}")
+    matches = []
+    for index, row in enumerate(rows):
+        if any(str(row.get(selector) or "") == str(value) for selector, value in selectors.items()):
+            matches.append((index, row))
+    return matches
+
+
+def registry_write_result(definition: dict[str, Any], data: dict[str, Any], args: dict[str, Any], action: str, before: Any, after: Any) -> dict[str, Any]:
+    path = storage_path(definition["key"])
+    if bool(args.get("dry_run")):
+        return {"registry": definition["name"], "key": definition["key"], "dry_run": True, "before": before, "after": after, "current_hash": path_hash(path)}
+    backup = backup_path(path, args.get("label") or definition["key"]) if bool(args.get("backup", True)) and path.exists() else None
+    info = dump_storage_json(definition["key"], data)
+    audit_event(action, {"key": definition["key"], "backup": backup})
+    return {"registry": definition["name"], "key": definition["key"], "before": before, "after": after, "backup": backup, "storage": info}
+
+
+def create_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    path = storage_path(definition["key"])
+    require_expected_hash(path, args.get("expected_hash"))
+    entry = args.get("entry")
+    if not isinstance(entry, dict):
+        raise ValueError("entry must be an object")
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    matches = duplicate_registry_matches(definition, entry, rows)
+    before = None
+    if matches:
+        if not bool(args.get("upsert")):
+            raise ValueError(f"Registry entry already exists; found {len(matches)} match(es)")
+        if len(matches) != 1:
+            raise ValueError(f"Upsert expected exactly one existing entry, found {len(matches)}")
+        index, before_entry = matches[0]
+        before = json.loads(json.dumps(before_entry, default=str))
+        rows[index] = entry
+    else:
+        rows.append(entry)
+    return registry_write_result(definition, data, args, "create_registry_entry", before, entry)
+
+
+def replace_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    path = storage_path(definition["key"])
+    require_expected_hash(path, args.get("expected_hash"))
+    entry = args.get("entry")
+    if not isinstance(entry, dict):
+        raise ValueError("entry must be an object")
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    matches = find_registry_entries(definition, args, rows)
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one {definition['key']} match, found {len(matches)}")
+    index, before_entry = matches[0]
+    before = json.loads(json.dumps(before_entry, default=str))
+    rows[index] = entry
+    return registry_write_result(definition, data, args, "replace_registry_entry", before, entry)
+
+
+def patch_any_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    path = storage_path(definition["key"])
+    require_expected_hash(path, args.get("expected_hash"))
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    matches = find_registry_entries(definition, args, rows)
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one {definition['key']} match, found {len(matches)}")
+    _index, entry = matches[0]
+    before = json.loads(json.dumps(entry, default=str))
+    for key_name in args.get("remove_keys") or []:
+        entry.pop(str(key_name), None)
+    patch = args.get("patch") or {}
+    if patch:
+        if not isinstance(patch, dict):
+            raise ValueError("patch must be an object")
+        entry.update(patch)
+    after = json.loads(json.dumps(entry, default=str))
+    return registry_write_result(definition, data, args, "patch_registry_entry", before, after)
+
+
+def delete_registry_entry(args: dict[str, Any]) -> dict[str, Any]:
+    definition = registry_definition(args)
+    path = storage_path(definition["key"])
+    require_expected_hash(path, args.get("expected_hash"))
+    data = load_storage_json(definition["key"])
+    rows = registry_rows(definition, data)
+    matches = find_registry_entries(definition, args, rows)
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one {definition['key']} match, found {len(matches)}")
+    index, entry = matches[0]
+    before = json.loads(json.dumps(entry, default=str))
+    if bool(args.get("dry_run")):
+        return {"registry": definition["name"], "key": definition["key"], "index": index, "dry_run": True, "would_delete": before, "current_hash": path_hash(path)}
+    if not bool(args.get("force")):
+        raise ValueError("delete_registry_entry requires force=true")
+    del rows[index]
+    return registry_write_result(definition, data, args, "delete_registry_entry", before, None)
+
+
 def contains_text(value: Any, query: str) -> bool:
     return query.lower() in json.dumps(value, default=str).lower()
 
@@ -4228,6 +4617,8 @@ def search_named_registry(key: str, list_name: str, args: dict[str, Any]) -> dic
         if args.get("id") and str(row.get("id") or "") != str(args["id"]):
             continue
         if args.get("name") and str(args["name"]).lower() not in str(row.get("name") or "").lower():
+            continue
+        if args.get("scope") and str(row.get("scope") or "") != str(args["scope"]):
             continue
         if query and not contains_text(row, query):
             continue
