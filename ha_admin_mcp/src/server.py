@@ -800,9 +800,20 @@ TOOLS = [
     tool_schema("list_automations", "Compatibility tool: list automation entities", {}, []),
     tool_schema("list_automation_configs", "List automation entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_automation_config", "Get compact automation config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
-    tool_schema("set_automation", "Create or replace a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("update_automation", "Update a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("get_automation", "Get the full live automation config plus entity state/source context", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
+    tool_schema("create_automation", "Create a Home Assistant automation through the live /config/automation/config API", {"id": {"type": "string"}, "entity_id": {"type": "string"}, "identifier": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("set_automation", "Create or replace a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "config_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("update_automation", "Update a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "config_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("patch_automation", "Patch a live automation config by id/entity/query with shallow or deep object merge", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "deep": {"type": "boolean"}, "config_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
+    tool_schema("rename_automation", "Rename an automation alias while preserving its config id", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "alias": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, ["alias"]),
+    tool_schema("duplicate_automation", "Copy an existing automation to a new id with optional alias and disabled state", {"source_entity_id": {"type": "string"}, "source_id": {"type": "string"}, "source_query": {"type": "string"}, "new_id": {"type": "string"}, "alias": {"type": "string"}, "enabled": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, ["new_id"]),
     tool_schema("delete_automation", "Delete a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
+    tool_schema("automation_control", "Run an automation service action: enable, disable, toggle, trigger, reload, turn_on, or turn_off", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "action": {"type": "string", "enum": ["enable", "disable", "toggle", "trigger", "reload", "turn_on", "turn_off"]}, "skip_condition": {"type": "boolean"}, "dry_run": {"type": "boolean"}}, ["action"]),
+    tool_schema("trigger_automation", "Trigger one automation with optional skip_condition", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "skip_condition": {"type": "boolean"}, "dry_run": {"type": "boolean"}}, []),
+    tool_schema("enable_automation", "Enable one automation entity", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}}, []),
+    tool_schema("disable_automation", "Disable one automation entity", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}}, []),
+    tool_schema("reload_automations", "Reload Home Assistant automations through automation.reload", {"dry_run": {"type": "boolean"}}, []),
+    tool_schema("automation_diagnostics", "Return automation state, full config, source context, traces, and optional latest trace in one bundle", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "include_trace": {"type": "boolean"}, "latest": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("list_script_configs", "List script entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("set_script", "Create or replace a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
@@ -2158,10 +2169,30 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_domain_configs("automation", args)
     if name == "get_automation_config":
         return get_domain_config("automation", args)
-    if name in ("set_automation", "update_automation"):
+    if name == "get_automation":
+        return get_automation(args)
+    if name in ("create_automation", "set_automation", "update_automation"):
         return update_config_item("automation", args)
+    if name == "patch_automation":
+        return patch_automation(args)
+    if name == "rename_automation":
+        return rename_automation(args)
+    if name == "duplicate_automation":
+        return duplicate_automation(args)
     if name == "delete_automation":
         return delete_config_item("automation", args)
+    if name == "automation_control":
+        return automation_control(args)
+    if name == "trigger_automation":
+        return automation_control(args | {"action": "trigger"})
+    if name == "enable_automation":
+        return automation_control(args | {"action": "enable"})
+    if name == "disable_automation":
+        return automation_control(args | {"action": "disable"})
+    if name == "reload_automations":
+        return automation_control(args | {"action": "reload"})
+    if name == "automation_diagnostics":
+        return automation_diagnostics(args)
     if name == "list_script_configs":
         return list_domain_configs("script", args)
     if name == "get_script_config":
@@ -2821,6 +2852,157 @@ def get_domain_config(domain: str, args: dict[str, Any]) -> dict[str, Any]:
     return {"domain": domain, "identifier": identifier, "entity_id": entity_id, "state": state, "matches": compact["items"], "source_contexts": contexts}
 
 
+def automation_item_id(args: dict[str, Any]) -> str:
+    item_id = config_item_id("automation", args)
+    if not item_id:
+        raise ValueError("automation id, entity_id, or query is required")
+    return item_id
+
+
+def automation_entity_id(args: dict[str, Any]) -> str:
+    raw = first_present(args, "entity_id", "id", "identifier", "item_id", "name")
+    if raw:
+        text = str(raw)
+        if text.startswith("automation."):
+            return text
+        if "." not in text:
+            return f"automation.{text}"
+    item_id = automation_item_id(args)
+    return f"automation.{item_id}"
+
+
+def get_automation(args: dict[str, Any]) -> dict[str, Any]:
+    item_id = automation_item_id(args)
+    endpoint = f"/config/automation/config/{item_id}"
+    config = ha_request("GET", endpoint)
+    normalized_config = normalize_automation_config(config) if isinstance(config, dict) else config
+    context = get_domain_config("automation", args | {"id": item_id, "context_lines": int(args.get("context_lines") or 20)})
+    return {
+        "domain": "automation",
+        "id": item_id,
+        "endpoint": endpoint,
+        "config": normalized_config,
+        "config_hash": compute_config_hash(normalized_config) if isinstance(normalized_config, dict) else None,
+        "raw_config": config,
+        "state": context.get("state"),
+        "matches": context.get("matches"),
+        "source_contexts": context.get("source_contexts"),
+    }
+
+
+def merge_dicts(base: dict[str, Any], patch: dict[str, Any], deep: bool = True) -> dict[str, Any]:
+    merged = json.loads(json.dumps(base, default=str))
+    for key, value in patch.items():
+        if deep and isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_dicts(merged[key], value, deep=True)
+        else:
+            merged[key] = value
+    return merged
+
+
+def patch_automation(args: dict[str, Any]) -> dict[str, Any]:
+    item_id = automation_item_id(args)
+    current = ha_request("GET", f"/config/automation/config/{item_id}")
+    if not isinstance(current, dict):
+        raise ValueError("Current automation config is not an object")
+    current = normalize_automation_config(current)
+    if args.get("config_hash") and compute_config_hash(current) != str(args["config_hash"]):
+        raise ValueError("config_hash mismatch; call get_automation again and retry with the fresh hash")
+    before = json.loads(json.dumps(current, default=str))
+    if args.get("replace") is not None:
+        if not isinstance(args["replace"], dict):
+            raise ValueError("replace must be an object")
+        after = args["replace"]
+    else:
+        after = json.loads(json.dumps(current, default=str))
+        for key_name in args.get("remove_keys") or []:
+            after.pop(str(key_name), None)
+        patch = args.get("patch") or {}
+        if patch:
+            if not isinstance(patch, dict):
+                raise ValueError("patch must be an object")
+            after = merge_dicts(after, patch, deep=bool(args.get("deep", True)))
+    after = normalize_automation_config(after)
+    after_hash = compute_config_hash(after)
+    if bool(args.get("dry_run")):
+        return {"domain": "automation", "id": item_id, "endpoint": f"/config/automation/config/{item_id}", "dry_run": True, "before": before, "after": after, "before_hash": compute_config_hash(before), "after_hash": after_hash}
+    result = update_config_item("automation", args | {"id": item_id, "config": after})
+    return {"domain": "automation", "id": item_id, "before": before, "after": after, "before_hash": compute_config_hash(before), "after_hash": after_hash, "result": result}
+
+
+def rename_automation(args: dict[str, Any]) -> dict[str, Any]:
+    return patch_automation(args | {"patch": {"alias": args["alias"]}})
+
+
+def duplicate_automation(args: dict[str, Any]) -> dict[str, Any]:
+    source_args = {
+        "id": args.get("source_id"),
+        "entity_id": args.get("source_entity_id"),
+        "query": args.get("source_query"),
+    }
+    source_id = automation_item_id(source_args)
+    new_id = str(args["new_id"])
+    source = ha_request("GET", f"/config/automation/config/{source_id}")
+    if not isinstance(source, dict):
+        raise ValueError("Source automation config is not an object")
+    new_config = normalize_automation_config(json.loads(json.dumps(source, default=str)))
+    new_config["id"] = new_id
+    if args.get("alias"):
+        new_config["alias"] = args["alias"]
+    if args.get("enabled") is not None:
+        new_config["enabled"] = bool(args["enabled"])
+    if bool(args.get("dry_run")):
+        return {"domain": "automation", "source_id": source_id, "new_id": new_id, "dry_run": True, "would_write": new_config}
+    result = update_config_item("automation", args | {"id": new_id, "config": new_config})
+    return {"domain": "automation", "source_id": source_id, "new_id": new_id, "config": new_config, "result": result}
+
+
+def automation_control(args: dict[str, Any]) -> dict[str, Any]:
+    action = str(args["action"])
+    service = {
+        "enable": "turn_on",
+        "disable": "turn_off",
+        "turn_on": "turn_on",
+        "turn_off": "turn_off",
+        "toggle": "toggle",
+        "trigger": "trigger",
+        "reload": "reload",
+    }.get(action)
+    if not service:
+        raise ValueError(f"Unsupported automation action: {action}")
+    data: dict[str, Any] = {}
+    entity_id = None
+    if service != "reload":
+        entity_id = automation_entity_id(args)
+        data["entity_id"] = entity_id
+    if service == "trigger":
+        data["skip_condition"] = bool(args.get("skip_condition", True))
+    endpoint = f"/services/automation/{service}"
+    if bool(args.get("dry_run")):
+        return {"domain": "automation", "action": action, "service": service, "endpoint": endpoint, "dry_run": True, "would_call": data}
+    audit_event("automation_control", {"action": action, "service": service, "entity_id": entity_id})
+    result = ha_request("POST", endpoint, data)
+    return {"domain": "automation", "action": action, "service": service, "entity_id": entity_id, "result": result}
+
+
+def automation_diagnostics(args: dict[str, Any]) -> dict[str, Any]:
+    item_id = automation_item_id(args)
+    entity_id = automation_entity_id(args | {"id": item_id})
+    result = get_automation(args | {"id": item_id})
+    result["traces"] = get_automation_traces({
+        "id": item_id,
+        "entity_id": entity_id,
+        "include_trace": bool(args.get("include_trace")),
+        "latest": bool(args.get("latest", True)),
+        "limit": int(args.get("limit") or 10),
+    })
+    try:
+        result["config_check"] = run_config_check()
+    except Exception as err:
+        result["config_check_error"] = str(err)
+    return result
+
+
 def get_automation_traces(args: dict[str, Any]) -> dict[str, Any]:
     trace_args = dict(args)
     trace_args["domain"] = "automation"
@@ -3136,6 +3318,48 @@ def first_present(args: dict[str, Any], *names: str) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def compute_config_hash(config: dict[str, Any]) -> str:
+    config_text = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(config_text.encode()).hexdigest()[:16]
+
+
+def normalize_automation_config(config: Any, is_root: bool = True) -> Any:
+    if isinstance(config, list):
+        return [normalize_automation_config(item, is_root=False) for item in config]
+    if not isinstance(config, dict):
+        return config
+    normalized = dict(config)
+    mappings: dict[str, str] = {}
+    if is_root:
+        mappings.update({"trigger": "triggers", "condition": "conditions", "action": "actions"})
+    mappings["sequences"] = "sequence"
+    for source, target in mappings.items():
+        if source in normalized and target not in normalized:
+            normalized[target] = normalized.pop(source)
+        elif source in normalized and target in normalized:
+            del normalized[source]
+    for key, value in list(normalized.items()):
+        normalized[key] = normalize_automation_config(value, is_root=False)
+    if is_root and isinstance(normalized.get("triggers"), list):
+        triggers = []
+        for trigger in normalized["triggers"]:
+            if isinstance(trigger, dict) and "platform" in trigger:
+                trigger = dict(trigger)
+                if "trigger" not in trigger:
+                    trigger["trigger"] = trigger.pop("platform")
+                else:
+                    del trigger["platform"]
+            triggers.append(trigger)
+        normalized["triggers"] = triggers
+    return normalized
+
+
+def normalize_domain_config(domain: str, config: dict[str, Any]) -> dict[str, Any]:
+    if domain == "automation":
+        return normalize_automation_config(config)
+    return config
 
 
 def compat_identifier(args: dict[str, Any]) -> str | None:
@@ -3472,10 +3696,19 @@ def update_config_item(domain: str, args: dict[str, Any]) -> dict[str, Any]:
         config = json.loads(str(args["content"]))
     if not isinstance(config, dict):
         raise ValueError("config or data object is required")
+    config = normalize_domain_config(domain, config)
     endpoint = f"/config/{domain}/config/{item_id}"
+    if args.get("config_hash"):
+        current = ha_request("GET", endpoint)
+        if not isinstance(current, dict):
+            raise ValueError(f"Current {domain} config is not an object")
+        current = normalize_domain_config(domain, current)
+        if compute_config_hash(current) != str(args["config_hash"]):
+            raise ValueError("config_hash mismatch; fetch the current config and retry with the fresh hash")
     if bool(args.get("dry_run")):
         current = ha_request("GET", endpoint)
-        return {"domain": domain, "id": item_id, "endpoint": endpoint, "dry_run": True, "current": current, "would_write": config}
+        current = normalize_domain_config(domain, current) if isinstance(current, dict) else current
+        return {"domain": domain, "id": item_id, "endpoint": endpoint, "dry_run": True, "current": current, "current_hash": compute_config_hash(current) if isinstance(current, dict) else None, "would_write": config, "would_write_hash": compute_config_hash(config)}
     audit_event(f"update_{domain}", {"id": item_id})
     result = ha_request("POST", endpoint, config)
     response: dict[str, Any] = {"domain": domain, "id": item_id, "endpoint": endpoint, "updated": True, "result": result}
