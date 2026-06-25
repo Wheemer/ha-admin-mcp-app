@@ -603,58 +603,58 @@ TOOLS = [
         },
         ["calls"],
     ),
-    tool_schema("stat_path", "Return filesystem metadata for any visible path", {"path": {"type": "string"}}, ["path"]),
+    tool_schema("stat_path", "Return filesystem metadata. Defaults to /config; relative paths are /config-relative.", {"path": {"type": "string"}}, []),
     tool_schema(
         "list_dir",
-        "List a directory visible to the app",
+        "List a directory. Defaults to /config; relative paths are /config-relative.",
         {"path": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
-        ["path"],
+        [],
     ),
     tool_schema(
         "read_file",
-        "Read a file visible to the app",
+        "Read a visible file. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
         ["path"],
     ),
     tool_schema(
         "read_file_window",
-        "Read a byte window from a visible file so large files can be inspected without transport truncation",
+        "Read a byte window from a visible file. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "length": {"type": "integer", "minimum": 1, "maximum": 10000000}},
         ["path"],
     ),
     tool_schema(
         "read_file_lines",
-        "Read a line-numbered window from a visible text file",
+        "Read a line-numbered window from a visible text file. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "start_line": {"type": "integer", "minimum": 1}, "line_count": {"type": "integer", "minimum": 1, "maximum": 10000}},
         ["path"],
     ),
     tool_schema(
         "read_file_base64",
-        "Read any visible file as base64 for binary-safe transfer",
+        "Read any visible file as base64. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}},
         ["path"],
     ),
     tool_schema(
         "write_file_base64",
-        "Write a visible file from base64 content, creating parent directories if needed",
+        "Write a visible file from base64 content. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "content_base64": {"type": "string"}, "mode": {"type": "string"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}},
         ["path", "content_base64"],
     ),
     tool_schema(
         "write_file",
-        "Write a file visible to the app, creating parent directories if needed",
+        "Write a file visible to the app. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}},
         ["path", "content"],
     ),
     tool_schema(
         "delete_path",
-        "Delete any visible file or directory",
+        "Delete any visible file or directory. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "recursive": {"type": "boolean"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
         ["path"],
     ),
     tool_schema(
         "search_files",
-        "Search filenames and text file contents under any visible directory",
+        "Search filenames and text file contents. Defaults to /config; relative paths are /config-relative.",
         {
             "path": {"type": "string"},
             "query": {"type": "string"},
@@ -663,7 +663,7 @@ TOOLS = [
             "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
             "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
         },
-        ["path"],
+        [],
     ),
     tool_schema(
         "glob_paths",
@@ -673,7 +673,7 @@ TOOLS = [
     ),
     tool_schema(
         "hash_file",
-        "Return cryptographic hashes for a visible file",
+        "Return cryptographic hashes for a visible file. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "algorithm": {"type": "string"}},
         ["path"],
     ),
@@ -841,13 +841,9 @@ TOOLS = [
     tool_schema("list_automation_configs", "List automation entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_automation_config", "Get compact automation config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("get_automation", "Get the full live automation config plus entity state/source context", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
-    tool_schema("create_automation", "Create a Home Assistant automation through the live /config/automation/config API", {"id": {"type": "string"}, "entity_id": {"type": "string"}, "identifier": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("set_automation", "Create or replace a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "config_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("update_automation", "Update a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "config_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
     tool_schema("patch_automation", "Patch a live automation config by id/entity/query with shallow or deep object merge", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "deep": {"type": "boolean"}, "config_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
     tool_schema("rename_automation", "Rename an automation alias while preserving its config id", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "alias": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, ["alias"]),
     tool_schema("duplicate_automation", "Copy an existing automation to a new id with optional alias and disabled state", {"source_entity_id": {"type": "string"}, "source_id": {"type": "string"}, "source_query": {"type": "string"}, "new_id": {"type": "string"}, "alias": {"type": "string"}, "enabled": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, ["new_id"]),
-    tool_schema("delete_automation", "Delete a Home Assistant automation through the live /config/automation/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema("automation_control", "Run an automation service action: enable, disable, toggle, trigger, reload, turn_on, or turn_off", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "action": {"type": "string", "enum": ["enable", "disable", "toggle", "trigger", "reload", "turn_on", "turn_off"]}, "skip_condition": {"type": "boolean"}, "dry_run": {"type": "boolean"}}, ["action"]),
     tool_schema("trigger_automation", "Trigger one automation with optional skip_condition", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "skip_condition": {"type": "boolean"}, "dry_run": {"type": "boolean"}}, []),
     tool_schema("enable_automation", "Enable one automation entity", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}}, []),
@@ -856,14 +852,8 @@ TOOLS = [
     tool_schema("automation_diagnostics", "Return automation state, full config, source context, traces, and optional latest trace in one bundle", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "include_trace": {"type": "boolean"}, "latest": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("list_script_configs", "List script entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_script_config", "Get compact script config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
-    tool_schema("set_script", "Create or replace a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("update_script", "Update a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("delete_script", "Delete a Home Assistant script through the live /config/script/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema("list_scene_configs", "List scene entities compactly with config ids and source hints", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("get_scene_config", "Get compact scene config/source context by entity_id, id, or query", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
-    tool_schema("set_scene", "Create or replace a Home Assistant scene through the live /config/scene/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("update_scene", "Update a Home Assistant scene through the live /config/scene/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "config": {"type": "object"}, "data": {"type": "object"}, "content": {"type": "string"}, "dry_run": {"type": "boolean"}, "check_config": {"type": "boolean"}, "reload": {"type": "boolean"}}, []),
-    tool_schema("delete_scene", "Delete a Home Assistant scene through the live /config/scene/config API", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "identifier": {"type": "string"}, "query": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema("list_traces", "List Home Assistant automation or script traces through the live WebSocket trace/list API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, ["domain"]),
     tool_schema("get_trace", "Read one Home Assistant automation or script trace by run_id through the live WebSocket trace/get API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "run_id": {"type": "string"}, "latest": {"type": "boolean"}}, ["domain"]),
     tool_schema("list_trace_contexts", "List Home Assistant automation or script trace contexts through the live WebSocket trace/contexts API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}}, ["domain"]),
@@ -1806,86 +1796,6 @@ UPSTREAM_COMPAT_TOOL_SCHEMAS = [upstream_compat_schema(name) for name in UPSTREA
 TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
 
 
-def high_level_alias_candidates(upstream_name: str) -> list[str]:
-    if not upstream_name.startswith("ha_"):
-        return []
-    base = upstream_name.removeprefix("ha_")
-    candidates = [base]
-    transforms = (
-        ("set_", "update_"),
-        ("remove_", "delete_"),
-        ("config_get_", "get_"),
-        ("config_set_", "update_"),
-        ("config_remove_", "delete_"),
-        ("config_delete_", "delete_"),
-        ("config_list_", "list_"),
-    )
-    for prefix, replacement in transforms:
-        if base.startswith(prefix):
-            candidates.append(replacement + base.removeprefix(prefix))
-    return candidates
-
-
-HIGH_LEVEL_COMPAT_TOOL_MAP: dict[str, str] = {}
-existing_tool_names = {tool["name"] for tool in TOOLS}
-for upstream_name in UPSTREAM_HA_MCP_TOOL_NAMES:
-    for alias in high_level_alias_candidates(upstream_name):
-        if alias not in existing_tool_names and alias not in HIGH_LEVEL_COMPAT_TOOL_MAP:
-            HIGH_LEVEL_COMPAT_TOOL_MAP[alias] = upstream_name
-
-HIGH_LEVEL_COMPAT_TOOL_SCHEMAS = [
-    tool_schema(
-        alias,
-        f"High-level Home Assistant alias for {upstream_name}; routed through this app's full-access primitives",
-        {
-            "entity_id": {"type": "string"},
-            "identifier": {"type": "string"},
-            "id": {"type": "string"},
-            "name": {"type": "string"},
-            "query": {"type": "string"},
-            "domain": {"type": "string"},
-            "service": {"type": "string"},
-            "action": {"type": "string"},
-            "data": {"type": "object"},
-            "config": {"type": "object"},
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "template": {"type": "string"},
-            "slug": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
-            "start_time": {"type": "string"},
-            "end_time": {"type": "string"},
-            "hours": {"type": "integer", "minimum": 1, "maximum": 100000},
-            "period": {"type": "string"},
-            "backup": {"type": "boolean"},
-            "dry_run": {"type": "boolean"},
-            "force": {"type": "boolean"},
-            "expected_hash": {"type": "string"},
-            "event_type": {"type": "string"},
-            "event": {"type": "string"},
-            "url": {"type": "string"},
-            "resource_id": {"type": "string"},
-            "resource": {"type": "object"},
-            "type": {"type": "string"},
-            "operations": {"type": "array", "items": {"type": "object"}},
-            "fields": {"type": "array", "items": {"type": "string"}},
-            "detailed": {"type": "boolean"},
-            "latest": {"type": "boolean"},
-            "include_trace": {"type": "boolean"},
-            "run_id": {"type": "string"},
-            "dashboard_id": {"type": "string"},
-            "arguments": {"type": "object"},
-            "skill": {"type": "string"},
-            "file": {"type": "string"},
-        },
-        [],
-    )
-    for alias, upstream_name in sorted(HIGH_LEVEL_COMPAT_TOOL_MAP.items())
-]
-
-TOOLS.extend(HIGH_LEVEL_COMPAT_TOOL_SCHEMAS)
-
-
 RESOURCES = [
     {"uri": "ha://core/info", "name": "Home Assistant Core info", "mimeType": "application/json"},
     {"uri": "ha://supervisor/info", "name": "Supervisor info", "mimeType": "application/json"},
@@ -1957,8 +1867,6 @@ PROMPTS = [
 def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name in UPSTREAM_HA_MCP_TOOL_NAMES:
         return call_upstream_compat_tool(name, args)
-    if name in HIGH_LEVEL_COMPAT_TOOL_MAP:
-        return call_upstream_compat_tool(HIGH_LEVEL_COMPAT_TOOL_MAP[name], args)
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
@@ -2020,24 +1928,26 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "batch_call_tools":
         return batch_call_tools(args)
     if name == "stat_path":
-        path = Path(args["path"])
+        path = visible_path(args.get("path"))
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
     if name == "list_dir":
-        path = Path(args["path"])
+        path = visible_path(args.get("path"))
         limit = int(args.get("limit") or 500)
         return [path_info(child) for child in list(path.iterdir())[:limit]]
     if name == "read_file":
-        content, truncated = read_limited(Path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
-        return {"path": args["path"], "content": content, "truncated": truncated}
+        path = visible_path(args.get("path"))
+        content, truncated = read_limited(path, int(args.get("max_bytes") or MAX_READ_BYTES))
+        return {"path": str(path), "content": content, "truncated": truncated}
     if name == "read_file_window":
-        return read_file_window(Path(args["path"]), int(args.get("offset") or 0), int(args.get("length") or 100000))
+        return read_file_window(visible_path(args.get("path")), int(args.get("offset") or 0), int(args.get("length") or 100000))
     if name == "read_file_lines":
-        return read_file_lines(Path(args["path"]), int(args.get("start_line") or 1), int(args.get("line_count") or 200))
+        return read_file_lines(visible_path(args.get("path")), int(args.get("start_line") or 1), int(args.get("line_count") or 200))
     if name == "read_file_base64":
-        data, truncated = read_bytes_limited(Path(args["path"]), int(args.get("max_bytes") or MAX_READ_BYTES))
-        return {"path": args["path"], "content_base64": base64.b64encode(data).decode(), "truncated": truncated}
+        path = visible_path(args.get("path"))
+        data, truncated = read_bytes_limited(path, int(args.get("max_bytes") or MAX_READ_BYTES))
+        return {"path": str(path), "content_base64": base64.b64encode(data).decode(), "truncated": truncated}
     if name == "write_file":
-        path = Path(args["path"])
+        path = visible_path(args.get("path"), require=True)
         require_expected_hash(path, args.get("expected_hash"))
         if bool(args.get("dry_run")):
             return {"path": str(path), "dry_run": True, "would_write_bytes": len(args["content"].encode()), "current_hash": path_hash(path)}
@@ -2048,7 +1958,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         audit_event("write_file", {"path": str(path), "bytes": len(args["content"].encode())})
         return path_info(path)
     if name == "write_file_base64":
-        path = Path(args["path"])
+        path = visible_path(args.get("path"), require=True)
         require_expected_hash(path, args.get("expected_hash"))
         data = base64.b64decode(args["content_base64"])
         if bool(args.get("dry_run")):
@@ -2060,7 +1970,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         audit_event("write_file_base64", {"path": str(path), "bytes": len(data)})
         return path_info(path)
     if name == "delete_path":
-        path = Path(args["path"])
+        path = visible_path(args.get("path"), require=True)
         require_force_for_path(path, args, "delete_path")
         if bool(args.get("dry_run")):
             return {"path": str(path), "dry_run": True, "exists": path.exists(), "recursive": bool(args.get("recursive"))}
@@ -2078,7 +1988,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "glob_paths":
         return glob_paths(args["pattern"], int(args.get("limit") or 500))
     if name == "hash_file":
-        return hash_file(Path(args["path"]), args.get("algorithm") or "sha256")
+        return hash_file(visible_path(args.get("path")), args.get("algorithm") or "sha256")
     if name == "ha_api":
         if str(args.get("method", "GET")).upper() not in ("GET", "HEAD", "OPTIONS"):
             audit_event("ha_api", {"method": args.get("method", "GET"), "endpoint": args["endpoint"]})
@@ -2163,16 +2073,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return get_domain_config("automation", args)
     if name == "get_automation":
         return get_automation(args)
-    if name in ("create_automation", "set_automation", "update_automation"):
-        return update_config_item("automation", args)
     if name == "patch_automation":
         return patch_automation(args)
     if name == "rename_automation":
         return rename_automation(args)
     if name == "duplicate_automation":
         return duplicate_automation(args)
-    if name == "delete_automation":
-        return delete_config_item("automation", args)
     if name == "automation_control":
         return automation_control(args)
     if name == "trigger_automation":
@@ -2189,18 +2095,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_domain_configs("script", args)
     if name == "get_script_config":
         return get_domain_config("script", args)
-    if name in ("set_script", "update_script"):
-        return update_config_item("script", args)
-    if name == "delete_script":
-        return delete_config_item("script", args)
     if name == "list_scene_configs":
         return list_domain_configs("scene", args)
     if name == "get_scene_config":
         return get_domain_config("scene", args)
-    if name in ("set_scene", "update_scene"):
-        return update_config_item("scene", args)
-    if name == "delete_scene":
-        return delete_config_item("scene", args)
     if name == "list_traces":
         return list_traces(args)
     if name == "get_trace":
@@ -4375,7 +4273,7 @@ def read_file_lines(path: Path, start_line: int, line_count: int) -> dict[str, A
 
 
 def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
-    root = Path(args["path"])
+    root = visible_path(args.get("path"))
     query = str(args.get("query") or "").lower()
     filename = args.get("filename")
     recursive = bool(args.get("recursive", True))
@@ -4445,6 +4343,17 @@ def backup_path(path: Path, label: str | None) -> dict[str, Any]:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)
     return {"source": str(path), "backup": str(destination)}
+
+
+def visible_path(path: Any = None, *, require: bool = False) -> Path:
+    if path in (None, ""):
+        if require:
+            raise ValueError("path is required")
+        return CONFIG_ROOT.resolve()
+    candidate = Path(str(path))
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (CONFIG_ROOT / candidate).resolve()
 
 
 def config_path(path: str) -> Path:
