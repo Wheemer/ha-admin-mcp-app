@@ -74,7 +74,7 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 
 Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
 
-Use `list_tools` to read the app's current live tool catalog, then use `call_tool` or `mcp_call_tool` to call any current tool by name:
+Use `refresh_tool_catalog` to get the current catalog hash and MCP `notifications/tools/list_changed` payload. Then use `list_tools` to read the app's current live tool catalog, and use `call_tool` or `mcp_call_tool` to call any current tool by name:
 
 ```json
 {
@@ -87,7 +87,7 @@ Use `list_tools` to read the app's current live tool catalog, then use `call_too
 }
 ```
 
-The router tool names are intended to stay stable so newly added tools can still be used immediately after the app updates.
+The router tool names are intended to stay stable so newly added tools can still be used immediately after the app updates. A client that freezes native direct namespace calls for the life of a session may still need a reconnect before new direct names appear, but it can use `mcp_call_tool` immediately.
 
 ## MCP Protocol Surface
 

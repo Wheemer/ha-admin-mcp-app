@@ -588,6 +588,12 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "refresh_tool_catalog",
+        "Return the current tool catalog fingerprint and MCP list-changed notification payload for clients that cache tool namespaces.",
+        {"include_tools": {"type": "boolean"}, "include_schema": {"type": "boolean"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
         "batch_call_tools",
         "Call multiple MCP tools sequentially and return compact per-call results",
         {
@@ -1925,6 +1931,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return proxy_call_tool(args, proxy_name=name)
     if name == "mcp_protocol_status":
         return mcp_protocol_status()
+    if name == "refresh_tool_catalog":
+        return refresh_tool_catalog(args)
     if name == "batch_call_tools":
         return batch_call_tools(args)
     if name == "stat_path":
@@ -2425,6 +2433,46 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "count": len(rows), "total": len(TOOLS), "tools": rows}
 
 
+def tool_catalog_fingerprint() -> str:
+    payload = [
+        {
+            "name": tool.get("name"),
+            "description": tool.get("description"),
+            "inputSchema": tool.get("inputSchema"),
+            "annotations": tool.get("annotations"),
+        }
+        for tool in sorted(TOOLS, key=lambda item: item["name"])
+    ]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
+
+
+def refresh_tool_catalog(args: dict[str, Any]) -> dict[str, Any]:
+    include_tools = bool(args.get("include_tools"))
+    catalog = list_tools({
+        "query": args.get("query") or "",
+        "limit": int(args.get("limit") or 10000),
+        "include_schema": bool(args.get("include_schema")),
+    })
+    result: dict[str, Any] = {
+        "success": True,
+        "catalog_hash": tool_catalog_fingerprint(),
+        "tool_count": len(TOOLS),
+        "upstream_ha_mcp_tool_count": len(UPSTREAM_HA_MCP_TOOL_NAMES),
+        "upstream_ha_mcp_missing": sorted(set(UPSTREAM_HA_MCP_TOOL_NAMES) - {tool["name"] for tool in TOOLS}),
+        "mcp_notification": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+        "native_namespace_note": (
+            "If the MCP client honors tools.listChanged, it should call tools/list again. "
+            "If it keeps a fixed native namespace for this session, use list_tools plus mcp_call_tool/call_tool without restarting Home Assistant."
+        ),
+        "stable_tools": ["refresh_tool_catalog", "list_tools", "search_tools", "mcp_call_tool", "call_tool", "mcp_protocol_status"],
+    }
+    if include_tools:
+        result["catalog"] = catalog
+    else:
+        result["catalog_summary"] = {"query": catalog["query"], "count": catalog["count"], "total": catalog["total"]}
+    return result
+
+
 def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
     target = args.get("name") or args.get("tool")
     if not target:
@@ -2487,7 +2535,7 @@ def mcp_protocol_status() -> dict[str, Any]:
             "upstream_homeassistant_ai_expected": len(upstream_names),
             "upstream_homeassistant_ai_missing": len(upstream_names - tool_names),
         },
-        "stable_refresh_tools": ["list_tools", "call_tool", "mcp_call_tool", "mcp_protocol_status"],
+        "stable_refresh_tools": ["refresh_tool_catalog", "list_tools", "call_tool", "mcp_call_tool", "mcp_protocol_status"],
         "upstream_homeassistant_ai_missing": sorted(upstream_names - tool_names),
     }
 
