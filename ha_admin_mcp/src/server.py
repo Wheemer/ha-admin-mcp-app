@@ -28,6 +28,7 @@ CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
+APP_ROOT = Path("/app")
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
@@ -158,6 +159,36 @@ def get_supervisor_token() -> str:
 def text_result(value: Any) -> dict[str, Any]:
     text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
     return {"content": [{"type": "text", "text": text}]}
+
+
+def public_base_url(headers: Any | None = None) -> str:
+    scheme = "http"
+    if headers:
+        forwarded_proto = headers.get("X-Forwarded-Proto")
+        if forwarded_proto:
+            scheme = str(forwarded_proto).split(",", 1)[0].strip() or scheme
+        host = headers.get("Host")
+    else:
+        host = None
+    if not host:
+        host = f"127.0.0.1:{MCP_PORT}"
+    return f"{scheme}://{host}"
+
+
+def app_server_info(headers: Any | None = None) -> dict[str, Any]:
+    base = public_base_url(headers)
+    return {
+        "name": "ha-admin-mcp",
+        "title": "HA Admin MCP",
+        "version": APP_VERSION,
+        "description": "Privileged Home Assistant administration MCP add-on",
+        "icons": [
+            {"src": f"{base}/icon.png", "mimeType": "image/png", "sizes": "512x512"},
+            {"src": f"{base}/logo.png", "mimeType": "image/png", "sizes": "512x512"},
+            {"src": f"{base}/icon.svg", "mimeType": "image/svg+xml"},
+        ],
+        "websiteUrl": "https://github.com/Wheemer/ha-admin-mcp-app",
+    }
 
 
 def tool_error_result(message: str, details: Any | None = None) -> dict[str, Any]:
@@ -6552,6 +6583,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.write_json({"ok": True, "dangerous": True})
             return
+        if self.path in {"/icon.png", "/logo.png", "/icon.svg", "/logo.svg"}:
+            self.write_asset(APP_ROOT / self.path.lstrip("/"))
+            return
         if is_mcp_path(self.path):
             if not self.authorized():
                 self.write_json({"error": "unauthorized"}, status=401)
@@ -6628,7 +6662,7 @@ class Handler(BaseHTTPRequestHandler):
                 protocol_version = requested_version if requested_version in SUPPORTED_PROTOCOL_VERSIONS else "2025-03-26"
                 result = {
                     "protocolVersion": protocol_version,
-                    "serverInfo": {"name": "ha-admin-mcp", "version": APP_VERSION},
+                    "serverInfo": app_server_info(self.headers),
                     "capabilities": {
                         "tools": {"listChanged": True},
                         "resources": {"subscribe": False, "listChanged": True},
@@ -6706,6 +6740,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         for name, value in (headers or {}).items():
             self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def write_asset(self, path: Path) -> None:
+        if not path.exists() or path.parent != APP_ROOT:
+            self.send_error(404)
+            return
+        mime = "image/svg+xml" if path.suffix == ".svg" else "image/png"
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 

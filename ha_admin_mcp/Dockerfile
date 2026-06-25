@@ -8,6 +8,10 @@ RUN pip3 install --no-cache-dir fastmcp==3.4.2
 
 COPY src /app/src
 COPY config.yaml /app/config.yaml
+COPY icon.png /app/icon.png
+COPY icon.svg /app/icon.svg
+COPY logo.png /app/logo.png
+COPY logo.svg /app/logo.svg
 COPY bin/ha /usr/local/bin/ha
 RUN chmod +x /usr/local/bin/ha
 
