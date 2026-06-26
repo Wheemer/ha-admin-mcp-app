@@ -102,20 +102,11 @@ They are not kept in live `/config` folders.
 
 Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
 
-The standard path is the MCP protocol path: reconnect or refresh the client so it reads `tools/list`, then call tools with `tools/call`.
-
-The app also exposes extension helpers for clients that cache native namespaces too aggressively:
-
-- `refresh_tool_catalog`: reports the current catalog hash and list-changed notification payload
-- `list_tools`: extension view of the same live tool catalog exposed by MCP `tools/list`
-- `search_tools`: extension search over the same live catalog
-- `call_tool` / `mcp_call_tool`: extension router for clients that cannot call a newly added direct tool until reconnect
-
-These helpers do not replace the baseline tool catalog. They are extra escape hatches.
+The app does not expose fake router or catalog tools for this. The standard path is the MCP protocol path: reconnect or refresh the client so it reads `tools/list`, then call tools with `tools/call`.
 
 ## Protocol Surface
 
-The app supports the expected MCP server avenues for Codex-style HTTP clients: initialize, tools list/call, resources list/read/templates, prompts list/get, completion, logging level changes, ping, notifications, cursor pagination, and resource subscribe/unsubscribe probes. `mcp_protocol_status` reports the live protocol method coverage and upstream `homeassistant-ai/ha-mcp` tool-name parity.
+The app supports the expected MCP server avenues for Codex-style HTTP clients: initialize, tools list/call, resources list/read/templates, prompts list/get, completion, logging level changes, ping, notifications, cursor pagination, and resource subscribe/unsubscribe probes.
 
 ## Notes
 

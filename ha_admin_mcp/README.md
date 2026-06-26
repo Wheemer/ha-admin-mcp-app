@@ -57,9 +57,9 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 
 ## Main Tool Groups
 
-- Shell and host control: `run_command`, `run_shell`, `ha_cli`, `get_environment`, `batch_call_tools`
+- Shell and host control: `run_command`, `run_shell`, `ha_cli`, `get_environment`
 - Upstream compatibility and discovery: `get_version`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `diagnostic_bundle`, `list_automations`, `list_traces`, `get_trace`, `list_trace_contexts`, `get_automation_traces`
-- `homeassistant-ai/ha-mcp` compatibility shims: the upstream `ha_*` tool names from the bundled upstream catalog are exposed and routed through this app's full-access primitives where a direct equivalent exists. HA Admin extension helpers such as `ha_search_tools`, `ha_deep_search`, and `ha_call_*_tool` remain available, but they are reported separately from baseline upstream parity.
+- `homeassistant-ai/ha-mcp` compatibility shims: implemented upstream `ha_*` tool names from the bundled upstream catalog are exposed and routed through this app's full-access primitives. Upstream names that would only return a placeholder are not advertised.
 - Filesystem control: `stat_path`, `list_dir`, `read_file`, `read_file_window`, `read_file_lines`, `read_file_base64`, `write_file`, `write_file_base64`, `delete_path`, `search_files`, `glob_paths`, `hash_file`. Search/list tools default to `/config`; relative paths are `/config`-relative.
 - Home Assistant APIs: `ha_api`, `supervisor_api`, `http_request`, `call_service`, `get_states`, `get_events`, `get_services`, `get_history`, `render_template`, `fire_event`
 - Automations/scripts/scenes: canonical upstream replace/delete tools are `ha_config_set_automation`, `ha_config_remove_automation`, `ha_config_set_script`, `ha_config_remove_script`, `ha_config_set_scene`, and `ha_config_remove_scene`. Admin App extras remain for source-aware reads and partial edits: `get_automation`, `patch_automation`, `rename_automation`, `duplicate_automation`, `automation_control`, `trigger_automation`, `enable_automation`, `disable_automation`, `reload_automations`, `automation_diagnostics`, `list_automation_configs`, `get_automation_config`, `list_script_configs`, `get_script_config`, `list_scene_configs`, `get_scene_config`, `list_traces`, `get_trace`, `list_trace_contexts`, `get_automation_traces`
@@ -72,28 +72,13 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 
 ## Tool Refresh Workflow
 
-Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects. The standard path is MCP `tools/list` and `tools/call`; the helpers below are extensions for clients that cache native namespaces too aggressively.
-
-Use `refresh_tool_catalog` to get the current catalog hash and MCP `notifications/tools/list_changed` payload. Then use `list_tools` to read the app's current live tool catalog, and use `call_tool` or `mcp_call_tool` to call any current tool by name:
-
-```json
-{
-  "name": "ha_config_set_automation",
-  "arguments": {
-    "entity_id": "automation.example",
-    "config": {},
-    "dry_run": true
-  }
-}
-```
-
-The router tool names are intended to stay stable so newly added tools can still be used immediately after the app updates. A client that freezes native direct namespace calls for the life of a session may still need a reconnect before new direct names appear, but it can use `mcp_call_tool` immediately.
+Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects. The app does not expose fake router or catalog tools for this. The standard path is MCP `tools/list` and `tools/call`.
 
 ## MCP Protocol Surface
 
 The app supports normal MCP discovery and reads for tools, resources, resource templates, prompts, completion, logging level changes, pings, batches, notifications, cursor pagination, and resource subscribe/unsubscribe probes. Useful resources include HA core/supervisor/host info, states, services, events, config files, storage keys, registries, and Lovelace dashboards/views.
 
-`mcp_protocol_status` reports the live protocol methods, negotiated endpoint metadata, supported protocol versions, stable router tools, and parity against the default `homeassistant-ai/ha-mcp` tool names.
+Protocol support is exposed through normal MCP methods, not through a fake status tool.
 
 ## Backup Policy
 

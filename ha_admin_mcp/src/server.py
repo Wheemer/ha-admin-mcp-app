@@ -35,6 +35,8 @@ S6_ENV_DIR = Path("/run/s6/container_environment")
 DEFAULT_MCP_PATH = "/mcp"
 MCP_PORT = 9583
 LOG_LEVEL = "info"
+SELF_ADDON_SLUGS = {"ha_admin_mcp", "bd7cf910_ha_admin_mcp"}
+SELF_UPDATE_ACTIONS = {"update", "rebuild"}
 DANGEROUS_PATHS = {"/", "/config", "/backup", "/data", "/share", "/ssl", "/addons", "/usr", "/bin", "/sbin", "/etc", "/root", "/var"}
 READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "check", "render", "overview", "summary")
 DESTRUCTIVE_HINTS = ("delete", "remove", "restart", "stop", "write", "patch", "set", "save", "run", "shell", "control", "call", "fire", "manage")
@@ -536,12 +538,13 @@ UPSTREAM_HA_MCP_TOOL_NAMES = list(UPSTREAM_TOOL_METADATA.keys())
 HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES = [
     "ha_search_entities",
     "ha_deep_search",
-    "ha_search_tools",
-    "ha_call_read_tool",
-    "ha_call_write_tool",
-    "ha_call_delete_tool",
-    "ha_get_skill_guide",
 ]
+UNIMPLEMENTED_UPSTREAM_TOOL_NAMES = {
+    "ha_get_dashboard_screenshot",
+    "ha_get_skill_guide",
+    "ha_install_mcp_tools",
+    "ha_manage_custom_tool",
+}
 
 
 def upstream_compat_schema(name: str) -> dict[str, Any]:
@@ -598,58 +601,6 @@ TOOLS = [
     ),
     tool_schema("get_target_identity", "Return the HA target identity this MCP app is controlling", {}, []),
     tool_schema("get_version", "Compatibility tool: return Home Assistant Core version", {}, []),
-    tool_schema(
-        "search_tools",
-        "Search this MCP server's tool catalog by name, description, or schema",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
-        ["query"],
-    ),
-    tool_schema(
-        "list_tools",
-        "Return this MCP server's current tool catalog. Use after app updates when the MCP client has not refreshed its native tool list.",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "include_schema": {"type": "boolean"}},
-        [],
-    ),
-    tool_schema(
-        "call_tool",
-        "Call any current MCP tool by name. This stable router lets clients use newly added tools before their native MCP tool list refreshes.",
-        {"name": {"type": "string"}, "arguments": {"type": "object"}},
-        ["name"],
-    ),
-    tool_schema(
-        "mcp_call_tool",
-        "Alias for call_tool. Call any current MCP tool by name after app updates without reconnecting the MCP client.",
-        {"name": {"type": "string"}, "arguments": {"type": "object"}},
-        ["name"],
-    ),
-    tool_schema(
-        "mcp_protocol_status",
-        "Return MCP protocol support, endpoint metadata, and upstream Home Assistant MCP tool parity for this app.",
-        {},
-        [],
-    ),
-    tool_schema(
-        "refresh_tool_catalog",
-        "Return the current tool catalog fingerprint and MCP list-changed notification payload for clients that cache tool namespaces.",
-        {"include_tools": {"type": "boolean"}, "include_schema": {"type": "boolean"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
-        [],
-    ),
-    tool_schema(
-        "batch_call_tools",
-        "Call multiple MCP tools sequentially and return compact per-call results",
-        {
-            "calls": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
-                    "required": ["name"],
-                },
-            },
-            "stop_on_error": {"type": "boolean"},
-        },
-        ["calls"],
-    ),
     tool_schema("stat_path", "Return filesystem metadata. Defaults to /config; relative paths are /config-relative.", {"path": {"type": "string"}}, []),
     tool_schema(
         "list_dir",
@@ -1742,7 +1693,10 @@ TOOLS = [
 ]
 
 
-UPSTREAM_COMPAT_TOOL_SCHEMAS = [upstream_compat_schema(name) for name in UPSTREAM_HA_MCP_TOOL_NAMES]
+IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES = [
+    name for name in UPSTREAM_HA_MCP_TOOL_NAMES if name not in UNIMPLEMENTED_UPSTREAM_TOOL_NAMES
+]
+UPSTREAM_COMPAT_TOOL_SCHEMAS = [upstream_compat_schema(name) for name in IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES]
 HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS = [
     tool_schema(
         "ha_search_entities",
@@ -1755,36 +1709,6 @@ HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS = [
         "HA Admin extension: search entities, active config, storage, files, and tools from one query",
         {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}},
         ["query"],
-    ),
-    tool_schema(
-        "ha_search_tools",
-        "HA Admin extension: search this server's tool catalog",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}},
-        ["query"],
-    ),
-    tool_schema(
-        "ha_call_read_tool",
-        "HA Admin extension: call a read-oriented tool by name",
-        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
-        [],
-    ),
-    tool_schema(
-        "ha_call_write_tool",
-        "HA Admin extension: call a write-oriented tool by name",
-        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
-        [],
-    ),
-    tool_schema(
-        "ha_call_delete_tool",
-        "HA Admin extension: call a delete/remove-oriented tool by name",
-        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
-        [],
-    ),
-    tool_schema(
-        "ha_get_skill_guide",
-        "HA Admin extension: return local guidance surfaces and recommended tools for a requested HA skill area",
-        {"skill": {"type": "string"}, "file": {"type": "string"}},
-        [],
     ),
 ]
 
@@ -1862,7 +1786,7 @@ PROMPTS = [
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
-    if name in UPSTREAM_HA_MCP_TOOL_NAMES or name in HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES:
+    if name in IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES or name in HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES:
         return call_upstream_compat_tool(name, args)
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
@@ -1914,18 +1838,6 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return get_target_identity()
     if name == "get_version":
         return get_version()
-    if name == "search_tools":
-        return search_tools(args["query"], int(args.get("limit") or 10))
-    if name == "list_tools":
-        return list_tools(args)
-    if name in ("call_tool", "mcp_call_tool"):
-        return proxy_call_tool(args, proxy_name=name)
-    if name == "mcp_protocol_status":
-        return mcp_protocol_status()
-    if name == "refresh_tool_catalog":
-        return refresh_tool_catalog(args)
-    if name == "batch_call_tools":
-        return batch_call_tools(args)
     if name == "stat_path":
         path = visible_path(args.get("path"))
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
@@ -2017,6 +1929,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "app_logs":
         return supervisor_request("GET", f"/addons/{args['slug']}/logs")
     if name == "app_control":
+        if is_self_addon_slug(args.get("slug")) and args.get("action") in SELF_UPDATE_ACTIONS:
+            return self_update_not_supported(str(args["slug"]), str(args["action"]))
         audit_event("app_control", {"slug": args["slug"], "action": args["action"]})
         return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
     if name == "restart_core":
@@ -2372,30 +2286,36 @@ def get_version() -> str:
     return str(info.get("version") or info.get("homeassistant") or info)
 
 
-def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
-    calls = args.get("calls") or []
-    if not isinstance(calls, list):
-        raise ValueError("calls must be a list")
-    stop_on_error = bool(args.get("stop_on_error", True))
-    results = []
-    for index, call in enumerate(calls):
-        if not isinstance(call, dict):
-            row = {"index": index, "error": "call must be an object"}
-        else:
-            tool_name = str(call.get("name") or "")
-            if not tool_name:
-                row = {"index": index, "error": "name is required"}
-            elif tool_name in {"batch_call_tools", "call_tool", "mcp_call_tool"}:
-                row = {"index": index, "name": tool_name, "error": "Refusing recursive proxy tool call"}
-            else:
-                try:
-                    row = {"index": index, "name": tool_name, "result": call_tool(tool_name, call.get("arguments") or {})}
-                except Exception as err:
-                    row = {"index": index, "name": tool_name, "error": str(err)}
-        results.append(row)
-        if stop_on_error and row.get("error"):
-            break
-    return {"count": len(results), "results": results}
+def is_self_addon_slug(slug: str | None) -> bool:
+    if not slug:
+        return False
+    normalized = slug.strip().lower().replace("-", "_")
+    return normalized in SELF_ADDON_SLUGS
+
+
+def self_update_not_supported(slug: str, action: str) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    try:
+        result = supervisor_request("GET", f"/addons/{slug}/info")
+        info = result.get("data", result) if isinstance(result, dict) else {}
+    except Exception as err:
+        info = {"error": str(err)}
+    return {
+        "success": False,
+        "blocked": True,
+        "slug": slug,
+        "action": action,
+        "reason": "Home Assistant Supervisor does not allow an add-on to update or rebuild itself through its own Supervisor token.",
+        "supervisor_guard": "self_update_forbidden",
+        "current_version": info.get("version"),
+        "latest_version": info.get("version_latest"),
+        "update_available": info.get("update_available"),
+        "external_update_required": True,
+        "external_update_paths": [
+            "Use Home Assistant Settings > Add-ons > HA Admin MCP > Update.",
+            "Call Supervisor /addons/{slug}/update from a different trusted add-on or host-level admin context.",
+        ],
+    }
 
 
 def tool_catalog_row(tool: dict[str, Any], include_schema: bool = False) -> dict[str, Any]:
@@ -2410,36 +2330,6 @@ def tool_catalog_row(tool: dict[str, Any], include_schema: bool = False) -> dict
     return row
 
 
-def list_tools(args: dict[str, Any]) -> dict[str, Any]:
-    query = str(args.get("query") or "").lower()
-    limit = int(args.get("limit") or 1000)
-    include_schema = bool(args.get("include_schema"))
-    rows = []
-    for tool in TOOLS:
-        if query and query not in json.dumps(tool, default=str).lower():
-            continue
-        rows.append(tool_catalog_row(tool, include_schema))
-        if len(rows) >= limit:
-            break
-    return {"query": query, "count": len(rows), "total": len(TOOLS), "tools": rows}
-
-
-def search_tool_catalog(query: str, limit: int, include_schema: bool = False) -> dict[str, Any]:
-    catalog = list_tools({"query": query, "limit": limit, "include_schema": include_schema})
-    rows = catalog["tools"]
-    return {
-        "query": catalog["query"],
-        "count": catalog["count"],
-        "total": catalog["total"],
-        "tool_count": catalog["total"],
-        "catalog_hash": tool_catalog_fingerprint(),
-        "upstream_ha_mcp_tool_count": len(UPSTREAM_HA_MCP_TOOL_NAMES),
-        "upstream_ha_mcp_missing": sorted(set(UPSTREAM_HA_MCP_TOOL_NAMES) - {tool["name"] for tool in TOOLS}),
-        "tools": rows,
-        "matches": rows,
-    }
-
-
 def tool_catalog_fingerprint() -> str:
     payload = [
         {
@@ -2451,106 +2341,6 @@ def tool_catalog_fingerprint() -> str:
         for tool in sorted(TOOLS, key=lambda item: item["name"])
     ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
-
-
-def refresh_tool_catalog(args: dict[str, Any]) -> dict[str, Any]:
-    include_tools = bool(args.get("include_tools"))
-    catalog = list_tools({
-        "query": args.get("query") or "",
-        "limit": int(args.get("limit") or 10000),
-        "include_schema": bool(args.get("include_schema")),
-    })
-    result: dict[str, Any] = {
-        "success": True,
-        "catalog_hash": tool_catalog_fingerprint(),
-        "tool_count": len(TOOLS),
-        "upstream_ha_mcp_tool_count": len(UPSTREAM_HA_MCP_TOOL_NAMES),
-        "upstream_ha_mcp_missing": sorted(set(UPSTREAM_HA_MCP_TOOL_NAMES) - {tool["name"] for tool in TOOLS}),
-        "mcp_notification": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
-        "native_namespace_note": (
-            "If the MCP client honors tools.listChanged, it should call tools/list again. "
-            "If it keeps a fixed native namespace for this session, use list_tools plus mcp_call_tool/call_tool without restarting Home Assistant."
-        ),
-        "stable_tools": ["refresh_tool_catalog", "list_tools", "search_tools", "mcp_call_tool", "call_tool", "mcp_protocol_status"],
-    }
-    if include_tools:
-        result["catalog"] = catalog
-    else:
-        result["catalog_summary"] = {"query": catalog["query"], "count": catalog["count"], "total": catalog["total"]}
-    return result
-
-
-def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
-    target = args.get("name") or args.get("tool")
-    if not target:
-        raise ValueError("name is required")
-    target_name = str(target)
-    if target_name in {proxy_name, "call_tool", "mcp_call_tool", "batch_call_tools"}:
-        raise ValueError("Refusing recursive proxy tool call")
-    known = {tool["name"] for tool in TOOLS}
-    if target_name not in known:
-        matches = search_tools(target_name, 10).get("matches", [])
-        raise ValueError(f"Unknown tool {target_name!r}. Matching tools: {[match['name'] for match in matches]}")
-    return call_tool(target_name, args.get("arguments") or {})
-
-
-def mcp_protocol_status() -> dict[str, Any]:
-    tool_names = {tool["name"] for tool in TOOLS}
-    upstream_names = set(UPSTREAM_HA_MCP_TOOL_NAMES)
-    return {
-        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
-        "transport": {
-            "kind": "streamable_http_json",
-            "post": True,
-            "get": "405_no_sse_stream",
-            "delete": "202_session_close_ack",
-            "session_header": "Mcp-Session-Id",
-            "protocol_version_header": "MCP-Protocol-Version",
-        },
-        "protocol_versions": sorted(SUPPORTED_PROTOCOL_VERSIONS),
-        "server_capabilities": {
-            "tools": {"listChanged": True, "paginated": True},
-            "resources": {"subscribe": False, "listChanged": True, "paginated": True},
-            "resourceTemplates": {"paginated": True},
-            "prompts": {"listChanged": True, "paginated": True},
-            "completions": True,
-            "logging": True,
-        },
-        "server_methods": [
-            "initialize",
-            "tools/list",
-            "tools/call",
-            "resources/list",
-            "resources/read",
-            "resources/templates/list",
-            "resources/subscribe",
-            "resources/unsubscribe",
-            "prompts/list",
-            "prompts/get",
-            "completion/complete",
-            "logging/setLevel",
-            "ping",
-            "notifications/*",
-        ],
-        "client_feature_methods_not_served": [
-            "roots/list",
-            "sampling/createMessage",
-            "elicitation/create",
-        ],
-        "tool_counts": {
-            "total": len(tool_names),
-            "upstream_homeassistant_ai_expected": len(upstream_names),
-            "upstream_homeassistant_ai_missing": len(upstream_names - tool_names),
-            "ha_admin_extensions": len(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES),
-        },
-        "stable_refresh_tools": ["refresh_tool_catalog", "list_tools", "call_tool", "mcp_call_tool", "mcp_protocol_status"],
-        "upstream_homeassistant_ai_missing": sorted(upstream_names - tool_names),
-        "ha_admin_extension_tools": HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES,
-    }
-
-
-def search_tools(query: str, limit: int) -> dict[str, Any]:
-    return search_tool_catalog(query, limit)
 
 
 def project_field(value: Any, field: str) -> Any:
@@ -3879,7 +3669,7 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         return call_entity_registry_tool(name, args)
     if name == "ha_search":
         query = str(args.get("query") or "")
-        return {"entities": search_entities(query, int(args.get("limit") or 20)), "tools": search_tools(query, 10)}
+        return {"entities": search_entities(query, int(args.get("limit") or 20))}
     if name == "ha_search_entities":
         query = str(args.get("query") or args.get("name") or "")
         limit = int(args.get("limit") or 50)
@@ -3897,41 +3687,6 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "config": search_active_config({"query": query, "limit": limit}) if query else [],
             "storage": search_common_storage(query, limit) if query else [],
             "files": search_files({"path": str(CONFIG_ROOT), "query": query, "recursive": True, "limit": limit}) if query else [],
-            "tools": search_tools(query, 20),
-        }
-    if name == "ha_search_tools":
-        return search_tools(str(args.get("query") or ""), int(args.get("limit") or 20))
-    if name in ("ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"):
-        target = args.get("name") or args.get("tool")
-        if not target:
-            raise ValueError("name is required")
-        target_name = str(target)
-        if target_name in {name, "ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"}:
-            raise ValueError("Refusing recursive proxy tool call")
-        lower = target_name.lower()
-        if name == "ha_call_read_tool" and not any(hint in lower for hint in READ_ONLY_HINTS):
-            raise ValueError(f"{target_name} is not obviously read-only; use ha_call_write_tool or the tool directly")
-        if name == "ha_call_delete_tool" and not any(hint in lower for hint in ("delete", "remove")):
-            raise ValueError(f"{target_name} is not obviously delete/remove; use ha_call_write_tool or the tool directly")
-        return call_tool(target_name, args.get("arguments") or {})
-    if name == "ha_get_skill_guide":
-        return {
-            "note": "This app exposes the upstream ha_get_skill_guide name. Use the listed built-in prompts and tool groups for the same job in this full-access app.",
-            "requested_skill": args.get("skill"),
-            "requested_file": args.get("file"),
-            "prompts": PROMPTS,
-            "recommended_tools": [
-                "search_tools",
-                "ha_search_tools",
-                "diagnostic_bundle",
-                "check_config_and_reload",
-                "live_lovelace_find_cards",
-                "live_lovelace_patch_card",
-                "search_active_config",
-                "search_storage_key",
-                "read_file_window",
-                "run_command",
-            ],
         }
     if name == "ha_get_overview":
         return system_overview()
@@ -4008,6 +3763,8 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         action = args.get("action")
         if not slug:
             raise ValueError("slug is required")
+        if is_self_addon_slug(slug) and action in SELF_UPDATE_ACTIONS:
+            return self_update_not_supported(str(slug), str(action))
         if action in {"start", "stop", "restart", "rebuild", "update", "install", "uninstall"}:
             return supervisor_request("POST", f"/addons/{slug}/{action}")
         if action == "get" or not action:
@@ -4168,17 +3925,6 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         if assistant:
             exposed = {eid: settings for eid, settings in exposed.items() if settings.get(assistant)}
         return {"success": True, "exposed_entities": exposed, "count": len(exposed), "filters_applied": {"assistant": assistant} if assistant else {}}
-    if name == "ha_get_dashboard_screenshot":
-        return {"note": "Dashboard screenshot capture requires the upstream Playwright sidecar; use this Admin App's live Lovelace read/write tools for dashboard verification in this add-on.", "recommended_tools": ["live_lovelace_get_outline", "live_lovelace_find_cards", "live_lovelace_save_config"], "args": args}
-    if name == "ha_manage_custom_tool":
-        return {"success": True, "managed_tools": search_tools(str(args.get("query") or "custom"), int(args.get("limit") or 20)), "note": "Custom tool package management is exposed through Admin App file/run primitives; this response lists available tool surfaces."}
-    if name == "ha_install_mcp_tools":
-        return {
-            "success": True,
-            "note": "This Admin App add-on already includes the MCP tool surface directly. For HACS upstream component installation, use ha_manage_hacs or supervisor/file tools with explicit approval.",
-            "recommended_tools": ["ha_get_hacs_info", "ha_manage_hacs", "supervisor_api", "run_command"],
-            "args": args,
-        }
     raise ValueError(f"Unhandled upstream compatibility tool: {name}")
 
 
