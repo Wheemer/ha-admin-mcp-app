@@ -58,8 +58,8 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 ## Main Tool Groups
 
 - Shell and host control: `run_command`, `run_shell`, `ha_cli`, `get_environment`, `batch_call_tools`
-- Upstream compatibility and discovery: `get_version`, `search_tools`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `diagnostic_bundle`, `list_automations`, `list_traces`, `get_trace`, `list_trace_contexts`, `get_automation_traces`
-- `homeassistant-ai/ha-mcp` compatibility shims: the upstream `ha_*` tool names are exposed and routed through this app's full-access primitives where a direct equivalent exists. The Admin App is not a drop-in copy of upstream; high-value upstream behaviors are ported explicitly into this add-on.
+- Upstream compatibility and discovery: `get_version`, `get_entity`, `entity_action`, `list_entities`, `search_entities`, `get_entities_by_area`, `domain_summary`, `system_overview`, `diagnostic_bundle`, `list_automations`, `list_traces`, `get_trace`, `list_trace_contexts`, `get_automation_traces`
+- `homeassistant-ai/ha-mcp` compatibility shims: the upstream `ha_*` tool names from the bundled upstream catalog are exposed and routed through this app's full-access primitives where a direct equivalent exists. HA Admin extension helpers such as `ha_search_tools`, `ha_deep_search`, and `ha_call_*_tool` remain available, but they are reported separately from baseline upstream parity.
 - Filesystem control: `stat_path`, `list_dir`, `read_file`, `read_file_window`, `read_file_lines`, `read_file_base64`, `write_file`, `write_file_base64`, `delete_path`, `search_files`, `glob_paths`, `hash_file`. Search/list tools default to `/config`; relative paths are `/config`-relative.
 - Home Assistant APIs: `ha_api`, `supervisor_api`, `http_request`, `call_service`, `get_states`, `get_events`, `get_services`, `get_history`, `render_template`, `fire_event`
 - Automations/scripts/scenes: canonical upstream replace/delete tools are `ha_config_set_automation`, `ha_config_remove_automation`, `ha_config_set_script`, `ha_config_remove_script`, `ha_config_set_scene`, and `ha_config_remove_scene`. Admin App extras remain for source-aware reads and partial edits: `get_automation`, `patch_automation`, `rename_automation`, `duplicate_automation`, `automation_control`, `trigger_automation`, `enable_automation`, `disable_automation`, `reload_automations`, `automation_diagnostics`, `list_automation_configs`, `get_automation_config`, `list_script_configs`, `get_script_config`, `list_scene_configs`, `get_scene_config`, `list_traces`, `get_trace`, `list_trace_contexts`, `get_automation_traces`
@@ -72,7 +72,7 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 
 ## Tool Refresh Workflow
 
-Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
+Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects. The standard path is MCP `tools/list` and `tools/call`; the helpers below are extensions for clients that cache native namespaces too aggressively.
 
 Use `refresh_tool_catalog` to get the current catalog hash and MCP `notifications/tools/list_changed` payload. Then use `list_tools` to read the app's current live tool catalog, and use `call_tool` or `mcp_call_tool` to call any current tool by name:
 

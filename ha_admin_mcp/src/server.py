@@ -532,6 +532,16 @@ def load_upstream_tool_metadata() -> dict[str, dict[str, Any]]:
 
 
 UPSTREAM_TOOL_METADATA = load_upstream_tool_metadata()
+UPSTREAM_HA_MCP_TOOL_NAMES = list(UPSTREAM_TOOL_METADATA.keys())
+HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES = [
+    "ha_search_entities",
+    "ha_deep_search",
+    "ha_search_tools",
+    "ha_call_read_tool",
+    "ha_call_write_tool",
+    "ha_call_delete_tool",
+    "ha_get_skill_guide",
+]
 
 
 def upstream_compat_schema(name: str) -> dict[str, Any]:
@@ -1732,105 +1742,55 @@ TOOLS = [
 ]
 
 
-UPSTREAM_HA_MCP_TOOL_NAMES = [
-    "ha_get_addon",
-    "ha_manage_addon",
-    "ha_list_floors_areas",
-    "ha_remove_area_or_floor",
-    "ha_set_area_or_floor",
-    "ha_manage_pipeline",
-    "ha_config_get_automation",
-    "ha_config_remove_automation",
-    "ha_config_set_automation",
-    "ha_get_blueprint",
-    "ha_import_blueprint",
-    "ha_config_get_calendar_events",
-    "ha_config_remove_calendar_event",
-    "ha_config_set_calendar_event",
-    "ha_get_camera_image",
-    "ha_get_dashboard_screenshot",
-    "ha_config_delete_dashboard_resource",
-    "ha_config_delete_dashboard",
-    "ha_config_get_dashboard",
-    "ha_config_list_dashboard_resources",
-    "ha_config_set_dashboard_resource",
-    "ha_config_set_dashboard",
-    "ha_get_device",
-    "ha_remove_device",
-    "ha_set_device",
-    "ha_manage_energy_prefs",
-    "ha_get_entity_exposure",
-    "ha_get_entity",
-    "ha_remove_entity",
-    "ha_set_entity",
-    "ha_delete_file",
-    "ha_list_files",
-    "ha_read_file",
-    "ha_write_file",
-    "ha_config_list_groups",
-    "ha_config_remove_group",
-    "ha_config_set_group",
-    "ha_get_hacs_info",
-    "ha_manage_hacs",
-    "ha_config_list_helpers",
-    "ha_config_set_helper",
-    "ha_remove_helpers_integrations",
-    "ha_get_automation_traces",
-    "ha_get_history",
-    "ha_get_logs",
-    "ha_get_integration",
-    "ha_get_system_health",
-    "ha_set_integration_enabled",
-    "ha_config_get_category",
-    "ha_config_get_label",
-    "ha_config_remove_category",
-    "ha_config_remove_label",
-    "ha_config_set_category",
-    "ha_config_set_label",
-    "ha_config_get_scene",
-    "ha_config_remove_scene",
-    "ha_config_set_scene",
-    "ha_config_get_script",
-    "ha_config_remove_script",
-    "ha_config_set_script",
-    "ha_get_overview",
-    "ha_get_state",
-    "ha_search",
-    "ha_search_entities",
-    "ha_deep_search",
-    "ha_search_tools",
-    "ha_call_read_tool",
-    "ha_call_write_tool",
-    "ha_call_delete_tool",
-    "ha_get_skill_guide",
-    "ha_bulk_control",
-    "ha_call_event",
-    "ha_call_service",
-    "ha_get_operation_status",
-    "ha_list_services",
-    "ha_config_set_yaml",
-    "ha_get_updates",
-    "ha_manage_backup",
-    "ha_manage_custom_tool",
-    "ha_manage_theme",
-    "ha_reload_core",
-    "ha_restart",
-    "ha_get_todo",
-    "ha_remove_todo_item",
-    "ha_set_todo_item",
-    "ha_get_zone",
-    "ha_remove_zone",
-    "ha_set_zone",
-    "ha_eval_template",
-    "ha_install_mcp_tools",
-    "ha_report_issue",
+UPSTREAM_COMPAT_TOOL_SCHEMAS = [upstream_compat_schema(name) for name in UPSTREAM_HA_MCP_TOOL_NAMES]
+HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS = [
+    tool_schema(
+        "ha_search_entities",
+        "HA Admin extension: search Home Assistant entities with optional domain filtering",
+        {"query": {"type": "string"}, "name": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}, "domain": {"type": "string"}, "domain_filter": {"type": "string"}},
+        [],
+    ),
+    tool_schema(
+        "ha_deep_search",
+        "HA Admin extension: search entities, active config, storage, files, and tools from one query",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}},
+        ["query"],
+    ),
+    tool_schema(
+        "ha_search_tools",
+        "HA Admin extension: search this server's tool catalog",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}},
+        ["query"],
+    ),
+    tool_schema(
+        "ha_call_read_tool",
+        "HA Admin extension: call a read-oriented tool by name",
+        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        [],
+    ),
+    tool_schema(
+        "ha_call_write_tool",
+        "HA Admin extension: call a write-oriented tool by name",
+        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        [],
+    ),
+    tool_schema(
+        "ha_call_delete_tool",
+        "HA Admin extension: call a delete/remove-oriented tool by name",
+        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        [],
+    ),
+    tool_schema(
+        "ha_get_skill_guide",
+        "HA Admin extension: return local guidance surfaces and recommended tools for a requested HA skill area",
+        {"skill": {"type": "string"}, "file": {"type": "string"}},
+        [],
+    ),
 ]
 
 
-UPSTREAM_COMPAT_TOOL_SCHEMAS = [upstream_compat_schema(name) for name in UPSTREAM_HA_MCP_TOOL_NAMES]
-
-
 TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
+TOOLS.extend(HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS)
 
 
 RESOURCES = [
@@ -1902,7 +1862,7 @@ PROMPTS = [
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
-    if name in UPSTREAM_HA_MCP_TOOL_NAMES:
+    if name in UPSTREAM_HA_MCP_TOOL_NAMES or name in HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES:
         return call_upstream_compat_tool(name, args)
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
@@ -2464,6 +2424,22 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "count": len(rows), "total": len(TOOLS), "tools": rows}
 
 
+def search_tool_catalog(query: str, limit: int, include_schema: bool = False) -> dict[str, Any]:
+    catalog = list_tools({"query": query, "limit": limit, "include_schema": include_schema})
+    rows = catalog["tools"]
+    return {
+        "query": catalog["query"],
+        "count": catalog["count"],
+        "total": catalog["total"],
+        "tool_count": catalog["total"],
+        "catalog_hash": tool_catalog_fingerprint(),
+        "upstream_ha_mcp_tool_count": len(UPSTREAM_HA_MCP_TOOL_NAMES),
+        "upstream_ha_mcp_missing": sorted(set(UPSTREAM_HA_MCP_TOOL_NAMES) - {tool["name"] for tool in TOOLS}),
+        "tools": rows,
+        "matches": rows,
+    }
+
+
 def tool_catalog_fingerprint() -> str:
     payload = [
         {
@@ -2565,22 +2541,16 @@ def mcp_protocol_status() -> dict[str, Any]:
             "total": len(tool_names),
             "upstream_homeassistant_ai_expected": len(upstream_names),
             "upstream_homeassistant_ai_missing": len(upstream_names - tool_names),
+            "ha_admin_extensions": len(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES),
         },
         "stable_refresh_tools": ["refresh_tool_catalog", "list_tools", "call_tool", "mcp_call_tool", "mcp_protocol_status"],
         "upstream_homeassistant_ai_missing": sorted(upstream_names - tool_names),
+        "ha_admin_extension_tools": HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES,
     }
 
 
 def search_tools(query: str, limit: int) -> dict[str, Any]:
-    needle = query.lower()
-    rows = []
-    for tool in TOOLS:
-        haystack = json.dumps(tool, default=str).lower()
-        if needle in haystack:
-            rows.append(tool_catalog_row(tool))
-            if len(rows) >= limit:
-                break
-    return {"query": query, "count": len(rows), "matches": rows}
+    return search_tool_catalog(query, limit)
 
 
 def project_field(value: Any, field: str) -> Any:

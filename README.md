@@ -102,13 +102,16 @@ They are not kept in live `/config` folders.
 
 Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
 
-To avoid relaunching the client for every app update, use the stable router tools:
+The standard path is the MCP protocol path: reconnect or refresh the client so it reads `tools/list`, then call tools with `tools/call`.
 
-- `list_tools`: shows the app's current live tool catalog
-- `call_tool`: calls any current tool by name with an `arguments` object
-- `mcp_call_tool`: alias for `call_tool`
+The app also exposes extension helpers for clients that cache native namespaces too aggressively:
 
-Those router names are intended to stay stable so newly added tools can still be used immediately after the app updates.
+- `refresh_tool_catalog`: reports the current catalog hash and list-changed notification payload
+- `list_tools`: extension view of the same live tool catalog exposed by MCP `tools/list`
+- `search_tools`: extension search over the same live catalog
+- `call_tool` / `mcp_call_tool`: extension router for clients that cannot call a newly added direct tool until reconnect
+
+These helpers do not replace the baseline tool catalog. They are extra escape hatches.
 
 ## Protocol Surface
 
