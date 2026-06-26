@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import fnmatch
+import ast
 import base64
 import json
 import os
@@ -9,6 +11,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +32,7 @@ DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
 APP_ROOT = Path("/app")
+SAVED_TOOLS_PATH = Path(os.environ.get("CODE_MODE_SAVED_TOOLS_PATH", "/data/saved_tools.json"))
 MAX_READ_BYTES = 20_000_000
 SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
@@ -200,6 +204,10 @@ def tool_error_result(message: str, details: Any | None = None) -> dict[str, Any
     result = text_result(payload)
     result["isError"] = True
     return result
+
+
+def is_mcp_content_result(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("content"), list)
 
 
 def paginated(items: list[dict[str, Any]], params: dict[str, Any], key: str) -> dict[str, Any]:
@@ -538,13 +546,12 @@ UPSTREAM_HA_MCP_TOOL_NAMES = list(UPSTREAM_TOOL_METADATA.keys())
 HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES = [
     "ha_search_entities",
     "ha_deep_search",
+    "ha_search_tools",
+    "ha_call_read_tool",
+    "ha_call_write_tool",
+    "ha_call_delete_tool",
 ]
-UNIMPLEMENTED_UPSTREAM_TOOL_NAMES = {
-    "ha_get_dashboard_screenshot",
-    "ha_get_skill_guide",
-    "ha_install_mcp_tools",
-    "ha_manage_custom_tool",
-}
+UNIMPLEMENTED_UPSTREAM_TOOL_NAMES: set[str] = set()
 
 
 def upstream_compat_schema(name: str) -> dict[str, Any]:
@@ -601,6 +608,58 @@ TOOLS = [
     ),
     tool_schema("get_target_identity", "Return the HA target identity this MCP app is controlling", {}, []),
     tool_schema("get_version", "Compatibility tool: return Home Assistant Core version", {}, []),
+    tool_schema(
+        "search_tools",
+        "Search this MCP server's live tool catalog by name, description, or schema",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}, "include_schema": {"type": "boolean"}},
+        ["query"],
+    ),
+    tool_schema(
+        "list_tools",
+        "Return this MCP server's live tool catalog",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "include_schema": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "call_tool",
+        "Call a currently registered MCP tool by name with an arguments object",
+        {"name": {"type": "string"}, "arguments": {"type": "object"}},
+        ["name"],
+    ),
+    tool_schema(
+        "mcp_call_tool",
+        "Alias for call_tool",
+        {"name": {"type": "string"}, "arguments": {"type": "object"}},
+        ["name"],
+    ),
+    tool_schema(
+        "mcp_protocol_status",
+        "Return MCP protocol support, endpoint metadata, and implemented upstream Home Assistant MCP tool parity",
+        {},
+        [],
+    ),
+    tool_schema(
+        "refresh_tool_catalog",
+        "Return the current tool catalog fingerprint and MCP list-changed notification payload",
+        {"include_tools": {"type": "boolean"}, "include_schema": {"type": "boolean"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
+        "batch_call_tools",
+        "Call multiple registered MCP tools sequentially and return per-call results",
+        {
+            "calls": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
+                    "required": ["name"],
+                },
+            },
+            "stop_on_error": {"type": "boolean"},
+        },
+        ["calls"],
+    ),
     tool_schema("stat_path", "Return filesystem metadata. Defaults to /config; relative paths are /config-relative.", {"path": {"type": "string"}}, []),
     tool_schema(
         "list_dir",
@@ -1710,6 +1769,30 @@ HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS = [
         {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}},
         ["query"],
     ),
+    tool_schema(
+        "ha_search_tools",
+        "HA Admin extension: search this server's live tool catalog",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}, "include_schema": {"type": "boolean"}},
+        ["query"],
+    ),
+    tool_schema(
+        "ha_call_read_tool",
+        "HA Admin extension: call a registered read-oriented tool by name",
+        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        [],
+    ),
+    tool_schema(
+        "ha_call_write_tool",
+        "HA Admin extension: call a registered write-oriented tool by name",
+        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        [],
+    ),
+    tool_schema(
+        "ha_call_delete_tool",
+        "HA Admin extension: call a registered delete/remove-oriented tool by name",
+        {"name": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        [],
+    ),
 ]
 
 
@@ -1838,6 +1921,18 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return get_target_identity()
     if name == "get_version":
         return get_version()
+    if name == "search_tools":
+        return search_tools(args["query"], int(args.get("limit") or 50), bool(args.get("include_schema")))
+    if name == "list_tools":
+        return list_tools(args)
+    if name in ("call_tool", "mcp_call_tool"):
+        return proxy_call_tool(args, proxy_name=name)
+    if name == "mcp_protocol_status":
+        return mcp_protocol_status()
+    if name == "refresh_tool_catalog":
+        return refresh_tool_catalog(args)
+    if name == "batch_call_tools":
+        return batch_call_tools(args)
     if name == "stat_path":
         path = visible_path(args.get("path"))
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
@@ -2341,6 +2436,145 @@ def tool_catalog_fingerprint() -> str:
         for tool in sorted(TOOLS, key=lambda item: item["name"])
     ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
+
+
+def list_tools(args: dict[str, Any]) -> dict[str, Any]:
+    query = str(args.get("query") or "").lower()
+    limit = int(args.get("limit") or 1000)
+    include_schema = bool(args.get("include_schema"))
+    rows = []
+    for tool in TOOLS:
+        if query and query not in json.dumps(tool, default=str).lower():
+            continue
+        rows.append(tool_catalog_row(tool, include_schema))
+        if len(rows) >= limit:
+            break
+    return {"query": query, "count": len(rows), "total": len(TOOLS), "tools": rows}
+
+
+def search_tools(query: str, limit: int, include_schema: bool = False) -> dict[str, Any]:
+    catalog = list_tools({"query": query, "limit": limit, "include_schema": include_schema})
+    return {
+        "query": catalog["query"],
+        "count": catalog["count"],
+        "total": catalog["total"],
+        "tools": catalog["tools"],
+        "matches": catalog["tools"],
+        "catalog_hash": tool_catalog_fingerprint(),
+    }
+
+
+def refresh_tool_catalog(args: dict[str, Any]) -> dict[str, Any]:
+    catalog = list_tools({
+        "query": args.get("query") or "",
+        "limit": int(args.get("limit") or 10000),
+        "include_schema": bool(args.get("include_schema")),
+    })
+    result: dict[str, Any] = {
+        "success": True,
+        "catalog_hash": tool_catalog_fingerprint(),
+        "tool_count": len(TOOLS),
+        "upstream_ha_mcp_tool_count": len(UPSTREAM_HA_MCP_TOOL_NAMES),
+        "implemented_upstream_ha_mcp_tool_count": len(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES),
+        "unimplemented_upstream_ha_mcp_tools": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
+        "mcp_notification": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+    }
+    if bool(args.get("include_tools")):
+        result["catalog"] = catalog
+    else:
+        result["catalog_summary"] = {"query": catalog["query"], "count": catalog["count"], "total": catalog["total"]}
+    return result
+
+
+def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
+    target = args.get("name") or args.get("tool")
+    if not target:
+        raise ValueError("name is required")
+    target_name = str(target)
+    if target_name in {proxy_name, "call_tool", "mcp_call_tool", "batch_call_tools", "ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"}:
+        raise ValueError("Refusing recursive proxy tool call")
+    known = {tool["name"] for tool in TOOLS}
+    if target_name not in known:
+        matches = search_tools(target_name, 10).get("matches", [])
+        raise ValueError(f"Unknown tool {target_name!r}. Matching tools: {[match['name'] for match in matches]}")
+    return call_tool(target_name, args.get("arguments") or {})
+
+
+def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
+    calls = args.get("calls") or []
+    if not isinstance(calls, list):
+        raise ValueError("calls must be a list")
+    stop_on_error = bool(args.get("stop_on_error", True))
+    results = []
+    for index, call in enumerate(calls):
+        if not isinstance(call, dict):
+            row = {"index": index, "error": "call must be an object"}
+        else:
+            tool_name = str(call.get("name") or "")
+            if not tool_name:
+                row = {"index": index, "error": "name is required"}
+            elif tool_name in {"batch_call_tools", "call_tool", "mcp_call_tool"}:
+                row = {"index": index, "name": tool_name, "error": "Refusing recursive proxy tool call"}
+            else:
+                try:
+                    row = {"index": index, "name": tool_name, "result": call_tool(tool_name, call.get("arguments") or {})}
+                except Exception as err:
+                    row = {"index": index, "name": tool_name, "error": str(err)}
+        results.append(row)
+        if stop_on_error and row.get("error"):
+            break
+    return {"count": len(results), "results": results}
+
+
+def mcp_protocol_status() -> dict[str, Any]:
+    tool_names = {tool["name"] for tool in TOOLS}
+    implemented = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
+    return {
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
+        "transport": {
+            "kind": "streamable_http_json",
+            "post": True,
+            "get": "405_no_sse_stream",
+            "delete": "202_session_close_ack",
+            "session_header": "Mcp-Session-Id",
+            "protocol_version_header": "MCP-Protocol-Version",
+        },
+        "protocol_versions": sorted(SUPPORTED_PROTOCOL_VERSIONS),
+        "server_capabilities": {
+            "tools": {"listChanged": True, "paginated": True},
+            "resources": {"subscribe": False, "listChanged": True, "paginated": True},
+            "resourceTemplates": {"paginated": True},
+            "prompts": {"listChanged": True, "paginated": True},
+            "completions": True,
+            "logging": True,
+        },
+        "server_methods": [
+            "initialize",
+            "tools/list",
+            "tools/call",
+            "resources/list",
+            "resources/read",
+            "resources/templates/list",
+            "resources/subscribe",
+            "resources/unsubscribe",
+            "prompts/list",
+            "prompts/get",
+            "completion/complete",
+            "logging/setLevel",
+            "ping",
+            "notifications/*",
+        ],
+        "tool_counts": {
+            "total": len(tool_names),
+            "upstream_homeassistant_ai_standard": len(UPSTREAM_HA_MCP_TOOL_NAMES),
+            "upstream_homeassistant_ai_implemented": len(implemented),
+            "upstream_homeassistant_ai_implemented_missing": len(implemented - tool_names),
+            "ha_admin_extensions": len(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES),
+        },
+        "upstream_homeassistant_ai_implemented_missing": sorted(implemented - tool_names),
+        "unimplemented_upstream_homeassistant_ai_tools": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
+        "ha_admin_extension_tools": HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES,
+    }
 
 
 def project_field(value: Any, field: str) -> Any:
@@ -3659,6 +3893,199 @@ def call_pipeline_tool(args: dict[str, Any]) -> dict[str, Any]:
     return {"success": True, "action": action, "result": result}
 
 
+def load_saved_tools() -> dict[str, dict[str, Any]]:
+    if not SAVED_TOOLS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SAVED_TOOLS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_saved_tools(data: dict[str, dict[str, Any]]) -> None:
+    SAVED_TOOLS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SAVED_TOOLS_PATH.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    SAVED_TOOLS_PATH.chmod(0o600)
+
+
+def validate_saved_tool_name(name: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", name):
+        raise ValueError("saved tool names must be 1-64 chars: letters, numbers, underscores")
+    return name
+
+
+def custom_tool_source_result(code: str) -> Any:
+    tree = ast.parse(code, mode="exec")
+    body = list(tree.body)
+    if body and isinstance(body[-1], ast.Expr):
+        body[-1] = ast.Return(value=body[-1].value)
+        ast.fix_missing_locations(tree)
+
+    async def api_get(endpoint: str) -> Any:
+        return ha_request("GET", endpoint)
+
+    async def api_post(endpoint: str, data: Any | None = None) -> Any:
+        return ha_request("POST", endpoint, data)
+
+    async def ws_send(message: dict[str, Any]) -> Any:
+        return ws_result(message)
+
+    async def call_registered_tool(tool_name: str, tool_args: dict[str, Any] | None = None) -> Any:
+        return call_tool(tool_name, tool_args or {})
+
+    def delete_saved_tool(name: str) -> dict[str, Any]:
+        saved = load_saved_tools()
+        removed = saved.pop(validate_saved_tool_name(name), None)
+        save_saved_tools(saved)
+        return {"deleted": removed is not None, "name": name}
+
+    async_src = "async def __ha_admin_custom_main():\n" + textwrap.indent(ast.unparse(ast.Module(body=body, type_ignores=[])), "    ")
+    namespace: dict[str, Any] = {
+        "api_get": api_get,
+        "api_post": api_post,
+        "ws_send": ws_send,
+        "call_tool": call_registered_tool,
+        "delete_saved_tool": delete_saved_tool,
+        "json": json,
+        "re": re,
+        "datetime": datetime,
+        "timedelta": timedelta,
+    }
+    exec(compile(async_src, "<ha_manage_custom_tool>", "exec"), namespace, namespace)
+    return asyncio.run(namespace["__ha_admin_custom_main"]())
+
+
+def manage_custom_tool(args: dict[str, Any]) -> dict[str, Any]:
+    modes = [bool(args.get("code")), bool(args.get("run_saved")), bool(args.get("list_saved"))]
+    if sum(modes) != 1:
+        raise ValueError("Use exactly one mode: code, run_saved, or list_saved")
+    saved = load_saved_tools()
+    if bool(args.get("list_saved")):
+        return {
+            "success": True,
+            "saved_tools_path": str(SAVED_TOOLS_PATH),
+            "tools": [{"name": name, "justification": item.get("justification")} for name, item in sorted(saved.items())],
+        }
+    if args.get("run_saved"):
+        name = validate_saved_tool_name(str(args["run_saved"]))
+        if name not in saved:
+            raise ValueError(f"saved custom tool not found: {name}")
+        result = custom_tool_source_result(str(saved[name].get("code") or ""))
+        return {"success": True, "mode": "run_saved", "name": name, "result": result}
+    code = str(args.get("code") or "")
+    justification = str(args.get("justification") or "")
+    if not justification:
+        raise ValueError("justification is required when executing custom code")
+    result = custom_tool_source_result(code)
+    response = {"success": True, "mode": "code", "result": result}
+    if args.get("save_as"):
+        name = validate_saved_tool_name(str(args["save_as"]))
+        saved[name] = {"code": code, "justification": justification, "saved_at": datetime.now(timezone.utc).isoformat()}
+        save_saved_tools(saved)
+        response["saved_as"] = name
+        response["saved_tools_path"] = str(SAVED_TOOLS_PATH)
+    return response
+
+
+def install_mcp_tools(args: dict[str, Any]) -> dict[str, Any]:
+    hacs = ws_result({"type": "hacs/info"})
+    repositories = ws_result({"type": "hacs/repositories/list"})
+    repo_id = "homeassistant-ai/ha-mcp-tools"
+    installed = False
+    if isinstance(repositories, list):
+        installed = any(
+            str(item.get("full_name") or item.get("repository") or item.get("name") or "").lower() == repo_id
+            or str(item.get("domain") or "").lower() == "ha_mcp_tools"
+            for item in repositories
+            if isinstance(item, dict)
+        )
+    actions: list[dict[str, Any]] = []
+    if not installed:
+        try:
+            actions.append({"add_repository": ws_result({"type": "hacs/repositories/add", "repository": repo_id, "category": "integration"}, timeout=120)})
+        except Exception as err:
+            actions.append({"add_repository_error": str(err)})
+        actions.append({"download": ws_result({"type": "hacs/repository/download", "repository": repo_id, "category": "integration"}, timeout=300)})
+    if bool(args.get("restart")):
+        actions.append({"restart": supervisor_request("POST", "/core/restart")})
+    return {
+        "success": True,
+        "hacs": hacs,
+        "repository": repo_id,
+        "already_installed": installed,
+        "actions": actions,
+        "restart_requested": bool(args.get("restart")),
+    }
+
+
+def validate_dashboard_path(path: str) -> str:
+    clean = path.strip().lstrip("/")
+    if not clean or clean in {".", ".."}:
+        raise ValueError("dashboard_path must name a Lovelace dashboard/view path")
+    parts = clean.split("/")
+    if any(part in {"", ".", ".."} or "\\" in part for part in parts):
+        raise ValueError("dashboard_path contains an invalid segment")
+    return "/".join(urllib.parse.quote(part, safe="") for part in parts)
+
+
+def discover_screenshot_engine_url() -> str:
+    explicit = os.environ.get("HAMCP_DASHBOARD_SCREENSHOT_ENGINE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    addons = supervisor_request("GET", "/addons")
+    addon_rows = ((addons.get("data") or {}).get("addons") or []) if isinstance(addons, dict) else []
+    matches = [row for row in addon_rows if str(row.get("slug", "")).endswith("_puppet")]
+    if not matches:
+        raise RuntimeError("Puppet dashboard screenshot engine add-on is not installed")
+    last: dict[str, Any] = {}
+    for row in matches:
+        slug = str(row.get("slug"))
+        info = supervisor_request("GET", f"/addons/{slug}/info")
+        data = info.get("data", info) if isinstance(info, dict) else {}
+        last = {"slug": slug, "state": data.get("state")}
+        if data.get("state") != "started":
+            continue
+        host = data.get("hostname") or data.get("ip_address")
+        if not host:
+            raise RuntimeError(f"Puppet screenshot engine add-on {slug} is started but has no hostname/ip_address")
+        return f"http://{host}:10000"
+    raise RuntimeError(f"Puppet dashboard screenshot engine add-on is installed but not started: {last}")
+
+
+def get_dashboard_screenshot(args: dict[str, Any]) -> dict[str, Any]:
+    path = validate_dashboard_path(str(args.get("dashboard_path") or ""))
+    width = int(args.get("width") or 1280)
+    height = 6000 if bool(args.get("full_page")) else int(args.get("height") or 720)
+    zoom = float(args.get("zoom") or 1.0)
+    wait_ms = int(args.get("wait_ms") or 1500)
+    engine = discover_screenshot_engine_url()
+    query = urllib.parse.urlencode({
+        "viewport": f"{width}x{height}",
+        "zoom": str(zoom),
+        "wait": str(wait_ms),
+        "format": "png",
+    })
+    request = urllib.request.Request(f"{engine}/{path}?{query}", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = response.read()
+            content_type = response.headers.get("Content-Type", "image/png")
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"Screenshot engine returned HTTP {err.code} for {path}: {detail}") from err
+    if not data:
+        raise RuntimeError(f"Screenshot engine returned an empty image for {path}")
+    return {
+        "content": [{
+            "type": "image",
+            "data": base64.b64encode(data).decode(),
+            "mimeType": content_type if content_type.startswith("image/") else "image/png",
+        }],
+        "_meta": {"engine_url": engine, "dashboard_path": path, "bytes": len(data)},
+    }
+
+
 def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
     identifier = compat_identifier(args)
     if name == "ha_get_state":
@@ -3687,7 +4114,21 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "config": search_active_config({"query": query, "limit": limit}) if query else [],
             "storage": search_common_storage(query, limit) if query else [],
             "files": search_files({"path": str(CONFIG_ROOT), "query": query, "recursive": True, "limit": limit}) if query else [],
+            "tools": search_tools(query, 20),
         }
+    if name == "ha_search_tools":
+        return search_tools(str(args.get("query") or ""), int(args.get("limit") or 20), bool(args.get("include_schema")))
+    if name in ("ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"):
+        target = args.get("name") or args.get("tool")
+        if not target:
+            raise ValueError("name is required")
+        target_name = str(target)
+        lower = target_name.lower()
+        if name == "ha_call_read_tool" and not any(hint in lower for hint in READ_ONLY_HINTS):
+            raise ValueError(f"{target_name} is not obviously read-only; use ha_call_write_tool or the tool directly")
+        if name == "ha_call_delete_tool" and not any(hint in lower for hint in ("delete", "remove")):
+            raise ValueError(f"{target_name} is not obviously delete/remove; use ha_call_write_tool or the tool directly")
+        return proxy_call_tool({"name": target_name, "arguments": args.get("arguments") or {}}, proxy_name=name)
     if name == "ha_get_overview":
         return system_overview()
     if name == "ha_get_system_health":
@@ -3899,8 +4340,14 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         if not entity_id:
             raise ValueError("entity_id is required")
         return ha_request("GET", f"/camera_proxy/{entity_id}")
+    if name == "ha_get_dashboard_screenshot":
+        return get_dashboard_screenshot(args)
     if name == "ha_manage_theme":
         return {"themes": search_files({"path": str(CONFIG_ROOT), "filename": "*.yaml", "query": args.get("query") or "frontend:", "recursive": True, "limit": int(args.get("limit") or 50)})}
+    if name == "ha_manage_custom_tool":
+        return manage_custom_tool(args)
+    if name == "ha_install_mcp_tools":
+        return install_mcp_tools(args)
     if name == "ha_report_issue":
         return {"title": args.get("title"), "body": args.get("body") or args.get("content"), "system_overview": system_overview()}
     if name == "ha_manage_pipeline":
@@ -6418,7 +6865,8 @@ class Handler(BaseHTTPRequestHandler):
                 if tool_name not in known_tool_names:
                     return self.rpc_error(request_id, -32602, f"Unknown tool: {tool_name}")
                 try:
-                    result = text_result(call_tool(tool_name, params.get("arguments") or {}))
+                    tool_value = call_tool(tool_name, params.get("arguments") or {})
+                    result = tool_value if is_mcp_content_result(tool_value) else text_result(tool_value)
                 except Exception as err:
                     result = tool_error_result(str(err), {"tool": tool_name})
             elif method == "ping":

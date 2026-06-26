@@ -102,7 +102,7 @@ They are not kept in live `/config` folders.
 
 Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects.
 
-The app does not expose fake router or catalog tools for this. The standard path is the MCP protocol path: reconnect or refresh the client so it reads `tools/list`, then call tools with `tools/call`.
+The standard path is the MCP protocol path: reconnect or refresh the client so it reads `tools/list`, then call tools with `tools/call`. The app also exposes real helper tools (`list_tools`, `search_tools`, `refresh_tool_catalog`, `call_tool`, `mcp_call_tool`, and `batch_call_tools`) for clients that cache native namespaces; those helpers operate against the same live tool catalog.
 
 ## Protocol Surface
 
