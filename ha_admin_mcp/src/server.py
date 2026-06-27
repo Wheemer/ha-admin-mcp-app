@@ -106,7 +106,7 @@ def load_options() -> dict[str, Any]:
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
-        "native_toolset": os.environ.get("NATIVE_TOOLSET", "standard"),
+        "native_toolset": os.environ.get("NATIVE_TOOLSET", "full"),
     }
 
 
@@ -1819,7 +1819,7 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
 
 
 def native_toolset_mode() -> str:
-    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "standard").lower()
+    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "full").lower()
     return mode if mode in {"bootstrap", "standard", "upstream", "full"} else "standard"
 
 
@@ -4345,25 +4345,11 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             return save_lovelace_dashboard(dash_args)
         return delete_lovelace_dashboard(dash_args)
     if name == "ha_config_list_dashboard_resources":
-        return read_storage_key("lovelace_resources", MAX_READ_BYTES)
+        return list_lovelace_resources()
     if name in ("ha_config_set_dashboard_resource", "ha_config_delete_dashboard_resource"):
-        resources = load_storage_json("lovelace_resources")
-        resources.setdefault("data", {}).setdefault("items", [])
-        item_id = args.get("id") or args.get("url") or args.get("resource_id")
         if name == "ha_config_delete_dashboard_resource":
-            if not bool(args.get("force")):
-                raise ValueError("ha_config_delete_dashboard_resource requires force=true")
-            if bool(args.get("dry_run")):
-                matches = [item for item in resources["data"]["items"] if item.get("id") == item_id or item.get("url") == item_id]
-                return {"resource": item_id, "matches": matches, "dry_run": True}
-            resources["data"]["items"] = [item for item in resources["data"]["items"] if item.get("id") != item_id and item.get("url") != item_id]
-        else:
-            if bool(args.get("dry_run")):
-                return {"resource": args.get("resource") or args.get("data") or {"id": item_id, "url": args.get("url"), "type": args.get("type")}, "dry_run": True}
-            item = args.get("resource") or args.get("data") or {"id": item_id, "url": args.get("url"), "type": args.get("type")}
-            resources["data"]["items"] = [old for old in resources["data"]["items"] if old.get("id") != item.get("id") and old.get("url") != item.get("url")]
-            resources["data"]["items"].append(item)
-        return dump_storage_json("lovelace_resources", resources)
+            return delete_lovelace_resource(args)
+        return set_lovelace_resource(args)
     if name in ("ha_get_device", "ha_set_device", "ha_remove_device"):
         return call_device_registry_tool(name, args)
     if name in ("ha_get_integration", "ha_set_integration_enabled"):
@@ -4700,6 +4686,79 @@ def report_issue_tool(args: dict[str, Any]) -> dict[str, Any]:
         "tool_catalog": mcp_protocol_status(),
     }
     return {"success": True, "report": report}
+
+
+def list_lovelace_resources() -> dict[str, Any]:
+    result = ws_result({"type": "lovelace/resources"})
+    resources = result if isinstance(result, list) else []
+    return {"success": True, "count": len(resources), "resources": resources}
+
+
+def lovelace_resource_payload(args: dict[str, Any]) -> dict[str, Any]:
+    source = args.get("resource") or args.get("data") or {}
+    if not isinstance(source, dict):
+        raise ValueError("resource/data must be an object")
+    merged = {**source, **{key: value for key, value in args.items() if value is not None}}
+    url = merged.get("url")
+    if not url:
+        raise ValueError("url is required")
+    resource_type = merged.get("resource_type") or merged.get("res_type") or merged.get("type") or "module"
+    return {"id": merged.get("id") or merged.get("resource_id") or merged.get("identifier"), "url": str(url), "type": str(resource_type)}
+
+
+def find_lovelace_resource(resources: list[dict[str, Any]], identifier: Any = None, url: str | None = None) -> dict[str, Any] | None:
+    if identifier:
+        ident = str(identifier)
+        for item in resources:
+            if str(item.get("id")) == ident or str(item.get("url")) == ident:
+                return item
+    if url:
+        for item in resources:
+            if item.get("url") == url:
+                return item
+    return None
+
+
+def set_lovelace_resource(args: dict[str, Any]) -> dict[str, Any]:
+    payload = lovelace_resource_payload(args)
+    resources = list_lovelace_resources()["resources"]
+    existing = find_lovelace_resource(resources, payload.get("id"), payload["url"])
+    if existing:
+        command = {
+            "type": "lovelace/resources/update",
+            "resource_id": existing["id"],
+            "res_type": payload["type"],
+            "url": payload["url"],
+        }
+        action = "update"
+    else:
+        command = {
+            "type": "lovelace/resources/create",
+            "res_type": payload["type"],
+            "url": payload["url"],
+        }
+        action = "create"
+    if bool(args.get("dry_run")):
+        return {"success": True, "dry_run": True, "action": action, "existing": existing, "command": command}
+    result = ws_result(command)
+    return {"success": True, "action": action, "existing": existing, "result": result, "resources": list_lovelace_resources()}
+
+
+def delete_lovelace_resource(args: dict[str, Any]) -> dict[str, Any]:
+    identifier = args.get("id") or args.get("resource_id") or args.get("identifier") or args.get("url")
+    if not identifier:
+        raise ValueError("id, resource_id, identifier, or url is required")
+    resources = list_lovelace_resources()["resources"]
+    existing = find_lovelace_resource(resources, identifier, str(args.get("url")) if args.get("url") else None)
+    if not existing:
+        raise ValueError(f"Lovelace resource not found: {identifier}")
+    command = {"type": "lovelace/resources/delete", "resource_id": existing["id"]}
+    if bool(args.get("dry_run")):
+        return {"success": True, "dry_run": True, "existing": existing, "command": command}
+    if not bool(args.get("force")):
+        raise ValueError("ha_config_delete_dashboard_resource requires force=true")
+    result = ws_result(command)
+    return {"success": True, "deleted": existing, "result": result, "resources": list_lovelace_resources()}
 
 
 def update_config_item(domain: str, args: dict[str, Any]) -> dict[str, Any]:
