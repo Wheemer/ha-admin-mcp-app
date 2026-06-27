@@ -527,6 +527,25 @@ def tool_schema(name: str, description: str, properties: dict[str, Any], require
     }
 
 
+def normalized_catalog_query(args: dict[str, Any] | None) -> str:
+    if not args:
+        return ""
+    value = args.get("query")
+    if value in (None, ""):
+        value = args.get("q") or args.get("text")
+    if value in (None, "") and isinstance(args.get("filter"), dict):
+        value = args.get("filter")
+    if isinstance(value, dict):
+        for key in ("query", "q", "text", "name", "term"):
+            nested = value.get(key)
+            if nested not in (None, ""):
+                value = nested
+                break
+        else:
+            value = json.dumps(value, sort_keys=True, default=str)
+    return str(value or "")
+
+
 def load_upstream_tool_metadata() -> dict[str, dict[str, Any]]:
     path = Path(__file__).with_name("upstream_tools.json")
     if not path.exists():
@@ -611,14 +630,30 @@ TOOLS = [
     tool_schema("get_version", "Compatibility tool: return Home Assistant Core version", {}, []),
     tool_schema(
         "search_tools",
-        "Search this MCP server's live tool catalog by name, description, or schema",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}, "include_schema": {"type": "boolean"}},
-        ["query"],
+        "Search this MCP server's live tool catalog by name, description, or schema. Accepts query as a string or catalog-style object payload.",
+        {
+            "query": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+            "q": {"type": "string"},
+            "text": {"type": "string"},
+            "filter": {"type": "object"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "include_schema": {"type": "boolean"},
+        },
+        [],
     ),
     tool_schema(
         "list_tools",
         "Return this MCP server's full registered tool catalog; set native_only=true to see what tools/list exposes directly",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "include_schema": {"type": "boolean"}, "native_only": {"type": "boolean"}, "exposed_only": {"type": "boolean"}},
+        {
+            "query": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+            "q": {"type": "string"},
+            "text": {"type": "string"},
+            "filter": {"type": "object"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "include_schema": {"type": "boolean"},
+            "native_only": {"type": "boolean"},
+            "exposed_only": {"type": "boolean"},
+        },
         [],
     ),
     tool_schema(
@@ -1965,7 +2000,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "get_version":
         return get_version()
     if name == "search_tools":
-        return search_tools(args["query"], int(args.get("limit") or 50), bool(args.get("include_schema")))
+        return search_tools(args, int(args.get("limit") or 50), bool(args.get("include_schema")))
     if name == "list_tools":
         return list_tools(args)
     if name in ("call_tool", "mcp_call_tool"):
@@ -2488,7 +2523,7 @@ def tool_catalog_fingerprint() -> str:
 
 
 def list_tools(args: dict[str, Any]) -> dict[str, Any]:
-    query = str(args.get("query") or "").lower()
+    query = normalized_catalog_query(args).lower()
     limit = int(args.get("limit") or 1000)
     include_schema = bool(args.get("include_schema"))
     native_only = bool(args.get("native_only") or args.get("exposed_only"))
@@ -2512,8 +2547,13 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def search_tools(query: str, limit: int, include_schema: bool = False) -> dict[str, Any]:
-    catalog = list_tools({"query": query, "limit": limit, "include_schema": include_schema})
+def search_tools(args: dict[str, Any] | str, limit: int | None = None, include_schema: bool = False) -> dict[str, Any]:
+    payload = {"query": args} if isinstance(args, str) else dict(args or {})
+    if payload.get("query") in (None, "") and isinstance(payload.get("filter"), dict):
+        payload["query"] = payload["filter"]
+    payload["limit"] = int(limit or payload.get("limit") or 50)
+    payload["include_schema"] = include_schema or bool(payload.get("include_schema"))
+    catalog = list_tools(payload)
     return {
         "query": catalog["query"],
         "count": catalog["count"],
