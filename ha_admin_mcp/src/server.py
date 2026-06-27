@@ -4525,8 +4525,18 @@ def manage_addon_tool(args: dict[str, Any]) -> dict[str, Any]:
     if action in {"start", "stop", "restart", "rebuild", "update", "install", "uninstall"}:
         return supervisor_request("POST", f"/addons/{slug}/{action}")
     if action in {"options", "set_options", "configure"}:
+        current = supervisor_request("GET", f"/addons/{slug}/info")
+        current_data = current.get("data", current) if isinstance(current, dict) else {}
         body: dict[str, Any] = {}
-        for key in ("options", "network", "boot", "auto_update", "watchdog"):
+        if "options" in args and args.get("options") is not None:
+            existing_options = current_data.get("options") if isinstance(current_data.get("options"), dict) else {}
+            new_options = args.get("options") if isinstance(args.get("options"), dict) else {}
+            body["options"] = {**existing_options, **new_options}
+        if "network" in args and args.get("network") is not None:
+            existing_network = current_data.get("network") if isinstance(current_data.get("network"), dict) else {}
+            new_network = args.get("network") if isinstance(args.get("network"), dict) else {}
+            body["network"] = {**existing_network, **new_network}
+        for key in ("boot", "auto_update", "watchdog"):
             if key in args and args.get(key) is not None:
                 body[key] = args[key]
         if isinstance(args.get("data"), dict):
