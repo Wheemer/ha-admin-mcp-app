@@ -106,6 +106,7 @@ def load_options() -> dict[str, Any]:
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
+        "native_toolset": os.environ.get("NATIVE_TOOLSET", "standard"),
     }
 
 
@@ -616,8 +617,8 @@ TOOLS = [
     ),
     tool_schema(
         "list_tools",
-        "Return this MCP server's live tool catalog",
-        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "include_schema": {"type": "boolean"}},
+        "Return this MCP server's full registered tool catalog; set native_only=true to see what tools/list exposes directly",
+        {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "include_schema": {"type": "boolean"}, "native_only": {"type": "boolean"}, "exposed_only": {"type": "boolean"}},
         [],
     ),
     tool_schema(
@@ -1804,6 +1805,44 @@ TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
 TOOLS.extend(HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS)
 
 
+BOOTSTRAP_NATIVE_TOOL_NAMES = {
+    "get_target_identity",
+    "get_version",
+    "search_tools",
+    "list_tools",
+    "call_tool",
+    "mcp_call_tool",
+    "mcp_protocol_status",
+    "refresh_tool_catalog",
+    "batch_call_tools",
+}
+
+
+def native_toolset_mode() -> str:
+    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "standard").lower()
+    return mode if mode in {"bootstrap", "standard", "upstream", "full"} else "standard"
+
+
+def native_tool_names() -> set[str]:
+    mode = native_toolset_mode()
+    if mode == "full":
+        return {tool["name"] for tool in TOOLS}
+    names = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
+    if mode == "upstream":
+        return names
+    names |= BOOTSTRAP_NATIVE_TOOL_NAMES
+    if mode == "standard":
+        names |= set(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES)
+    if mode == "bootstrap":
+        names = set(BOOTSTRAP_NATIVE_TOOL_NAMES)
+    return names
+
+
+def native_tools() -> list[dict[str, Any]]:
+    names = native_tool_names()
+    return [tool for tool in TOOLS if tool["name"] in names]
+
+
 RESOURCES = [
     {"uri": "ha://core/info", "name": "Home Assistant Core info", "mimeType": "application/json"},
     {"uri": "ha://supervisor/info", "name": "Supervisor info", "mimeType": "application/json"},
@@ -2443,7 +2482,7 @@ def tool_catalog_fingerprint() -> str:
             "inputSchema": tool.get("inputSchema"),
             "annotations": tool.get("annotations"),
         }
-        for tool in sorted(TOOLS, key=lambda item: item["name"])
+        for tool in sorted(native_tools(), key=lambda item: item["name"])
     ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
 
@@ -2452,14 +2491,25 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     query = str(args.get("query") or "").lower()
     limit = int(args.get("limit") or 1000)
     include_schema = bool(args.get("include_schema"))
+    native_only = bool(args.get("native_only") or args.get("exposed_only"))
+    catalog = native_tools() if native_only else TOOLS
     rows = []
-    for tool in TOOLS:
+    for tool in catalog:
         if query and query not in json.dumps(tool, default=str).lower():
             continue
         rows.append(tool_catalog_row(tool, include_schema))
         if len(rows) >= limit:
             break
-    return {"query": query, "count": len(rows), "total": len(TOOLS), "tools": rows}
+    return {
+        "query": query,
+        "count": len(rows),
+        "total": len(catalog),
+        "native_only": native_only,
+        "native_toolset": native_toolset_mode(),
+        "native_tool_count": len(native_tools()),
+        "registered_tool_count": len(TOOLS),
+        "tools": rows,
+    }
 
 
 def search_tools(query: str, limit: int, include_schema: bool = False) -> dict[str, Any]:
@@ -2483,7 +2533,9 @@ def refresh_tool_catalog(args: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         "success": True,
         "catalog_hash": tool_catalog_fingerprint(),
-        "tool_count": len(TOOLS),
+        "tool_count": len(native_tools()),
+        "registered_tool_count": len(TOOLS),
+        "native_toolset": native_toolset_mode(),
         "upstream_ha_mcp_tool_count": len(UPSTREAM_HA_MCP_TOOL_NAMES),
         "implemented_upstream_ha_mcp_tool_count": len(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES),
         "unimplemented_upstream_ha_mcp_tools": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
@@ -2538,13 +2590,14 @@ def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
 
 def mcp_protocol_status() -> dict[str, Any]:
     tool_names = {tool["name"] for tool in TOOLS}
+    exposed_tool_names = {tool["name"] for tool in native_tools()}
     implemented = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
     return {
         "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
         "transport": {
             "kind": "streamable_http_json",
             "post": True,
-            "get": "405_no_sse_stream",
+            "get": "sse_endpoint_compat",
             "delete": "202_session_close_ack",
             "session_header": "Mcp-Session-Id",
             "protocol_version_header": "MCP-Protocol-Version",
@@ -2575,12 +2628,15 @@ def mcp_protocol_status() -> dict[str, Any]:
             "notifications/*",
         ],
         "tool_counts": {
-            "total": len(tool_names),
+            "native_exposed": len(exposed_tool_names),
+            "registered_total": len(tool_names),
+            "native_toolset": native_toolset_mode(),
             "upstream_homeassistant_ai_standard": len(UPSTREAM_HA_MCP_TOOL_NAMES),
             "upstream_homeassistant_ai_implemented": len(implemented),
             "upstream_homeassistant_ai_implemented_missing": len(implemented - tool_names),
             "ha_admin_extensions": len(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES),
         },
+        "native_exposed_tool_sample": sorted(exposed_tool_names)[:25],
         "upstream_homeassistant_ai_implemented_missing": sorted(implemented - tool_names),
         "unimplemented_upstream_homeassistant_ai_tools": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
         "ha_admin_extension_tools": HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES,
@@ -7009,6 +7065,14 @@ def is_mcp_path(path: str) -> bool:
 class Handler(BaseHTTPRequestHandler):
     server_version = "HAAdminMCP/0.1"
 
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_common_headers()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:
         if self.path == "/health":
             self.write_json({"ok": True, "dangerous": True})
@@ -7020,7 +7084,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorized():
                 self.write_json({"error": "unauthorized"}, status=401)
                 return
-            self.send_error(405, "SSE streams are not implemented")
+            self.send_response(200)
+            self.send_common_headers()
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            payload = b": ha-admin-mcp streamable-http endpoint; use POST for JSON-RPC\n\n"
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
         self.send_error(404)
 
@@ -7056,7 +7128,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         extra_headers = {}
         if isinstance(message, dict) and message.get("method") == "initialize":
-            extra_headers["Mcp-Session-Id"] = str(uuid.uuid4())
+            extra_headers["Mcp-Session-Id"] = self.session_id()
         self.write_json(response, headers=extra_headers)
 
     def do_DELETE(self) -> None:
@@ -7065,6 +7137,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.write_json({"error": "unauthorized"}, status=401)
                 return
             self.send_response(202)
+            self.send_common_headers()
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -7075,6 +7148,9 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             return True
         return self.headers.get("Authorization") == f"Bearer {token}"
+
+    def session_id(self) -> str:
+        return self.headers.get("Mcp-Session-Id") or self.headers.get("mcp-session-id") or str(uuid.uuid4())
 
     def handle_message(self, message: Any) -> Any | None:
         if isinstance(message, list):
@@ -7108,7 +7184,7 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 }
             elif method == "tools/list":
-                result = paginated(TOOLS, request.get("params") or {}, "tools")
+                result = paginated(native_tools(), request.get("params") or {}, "tools")
             elif method == "prompts/list":
                 result = paginated(PROMPTS, request.get("params") or {}, "prompts")
             elif method == "prompts/get":
@@ -7167,12 +7243,18 @@ class Handler(BaseHTTPRequestHandler):
     def write_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(payload, default=str, ensure_ascii=True).encode("utf-8")
         self.send_response(status)
+        self.send_common_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
+
+    def send_common_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version")
+        self.send_header("MCP-Protocol-Version", max(SUPPORTED_PROTOCOL_VERSIONS))
 
     def write_asset(self, path: Path) -> None:
         if not path.exists() or path.parent != APP_ROOT:
