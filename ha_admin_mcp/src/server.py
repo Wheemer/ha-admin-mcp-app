@@ -44,6 +44,8 @@ SELF_UPDATE_ACTIONS = {"update", "rebuild"}
 DANGEROUS_PATHS = {"/", "/config", "/backup", "/data", "/share", "/ssl", "/addons", "/usr", "/bin", "/sbin", "/etc", "/root", "/var"}
 READ_ONLY_HINTS = ("get", "list", "read", "search", "hash", "stat", "tail", "check", "render", "overview", "summary")
 DESTRUCTIVE_HINTS = ("delete", "remove", "restart", "stop", "write", "patch", "set", "save", "run", "shell", "control", "call", "fire", "manage")
+SIMPLE_HELPER_TYPES = {"input_button", "input_boolean", "input_select", "input_number", "input_text", "input_datetime", "counter", "timer", "schedule", "zone", "person", "tag"}
+FLOW_HELPER_TYPES = {"template", "group", "utility_meter", "derivative", "min_max", "threshold", "integration", "statistics", "trend", "random", "filter", "tod", "generic_thermostat", "switch_as_x", "generic_hygrostat"}
 LOVELACE_STORAGE_EDIT_WARNING = (
     "Reminder: storage-backed Lovelace edits are not the preferred path for UI changes. "
     "Use live_lovelace_get_outline/live_lovelace_find_cards/live_lovelace_patch_card/live_lovelace_save_config "
@@ -310,9 +312,18 @@ def maybe_query(endpoint: str, query: dict[str, Any]) -> str:
     return endpoint + separator + urllib.parse.urlencode(clean)
 
 
+def normalize_ha_api_endpoint(endpoint: str) -> str:
+    normalized = "/" + str(endpoint or "").lstrip("/")
+    if normalized == "/api":
+        return "/"
+    if normalized.startswith("/api/"):
+        return normalized[4:]
+    return normalized
+
+
 def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
     token = get_supervisor_token()
-    endpoint = "/" + endpoint.lstrip("/")
+    endpoint = normalize_ha_api_endpoint(endpoint)
     body = None if data is None else json.dumps(data).encode()
     request = urllib.request.Request(
         f"http://supervisor/core/api{endpoint}",
@@ -599,7 +610,7 @@ def upstream_compat_schema(name: str) -> dict[str, Any]:
 TOOLS = [
     tool_schema(
         "run_command",
-        "Run an arbitrary shell command with the app's privileged access",
+        "Run an arbitrary shell command inside the HA Admin MCP add-on container. This is not host Docker or HA Core shell access; use ha_cli, supervisor_api, app_logs, or core_info for Supervisor/Core operations.",
         {
             "command": {"type": "string"},
             "cwd": {"type": "string"},
@@ -772,8 +783,8 @@ TOOLS = [
     ),
     tool_schema(
         "ha_api",
-        "Call the Home Assistant REST API through the Supervisor token",
-        {"method": {"type": "string"}, "endpoint": {"type": "string"}, "data": {"type": "object"}},
+        "Call the Home Assistant REST API through the Supervisor token. endpoint accepts either states/sensor.x or /api/states/sensor.x; /api is normalized away.",
+        {"method": {"type": "string"}, "endpoint": {"type": "string", "description": "HA REST path with or without /api prefix, e.g. states/sensor.temp or /api/states/sensor.temp"}, "data": {"type": "object"}},
         ["endpoint"],
     ),
     tool_schema(
@@ -834,8 +845,8 @@ TOOLS = [
         },
         ["slug", "action"],
     ),
-    tool_schema("restart_core", "Restart Home Assistant Core through Supervisor", {"force": {"type": "boolean"}}, []),
-    tool_schema("stop_core", "Stop Home Assistant Core through Supervisor", {"force": {"type": "boolean"}}, []),
+    tool_schema("restart_core", "Restart Home Assistant Core through Supervisor. Requires force=true.", {"force": {"type": "boolean", "description": "Required safety gate. Must be true to restart Core.", "default": False}}, []),
+    tool_schema("stop_core", "Stop Home Assistant Core through Supervisor. Requires force=true.", {"force": {"type": "boolean", "description": "Required safety gate. Must be true to stop Core.", "default": False}}, []),
     tool_schema("start_core", "Start Home Assistant Core through Supervisor", {}, []),
     tool_schema("reload_core_config", "Reload Home Assistant core config through REST API", {}, []),
     tool_schema(
@@ -1546,8 +1557,8 @@ TOOLS = [
     ),
     tool_schema(
         "live_lovelace_patch_card",
-        "Patch exactly one card and save through the Home Assistant WebSocket API instead of storage writes",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}},
+        "Patch exactly one card and save through the Home Assistant WebSocket API instead of storage writes. Non-dry-run writes require force=true.",
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean", "description": "Required for actual dashboard writes. Omit or false only with dry_run=true.", "default": False}},
         [],
     ),
     tool_schema(
@@ -3885,7 +3896,7 @@ def call_group_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
 def call_helper_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "ha_config_list_helpers":
         helper_type = args.get("helper_type") or args.get("type") or args.get("domain")
-        domains = [helper_type] if helper_type else ["input_button", "input_boolean", "input_select", "input_number", "input_text", "input_datetime", "counter", "timer", "schedule", "zone", "person", "tag"]
+        domains = [helper_type] if helper_type else sorted(SIMPLE_HELPER_TYPES)
         entities = []
         for domain in domains:
             entities.extend(list_entities({"domain": domain, "detailed": True, "limit": 10000}).get("entities", []))
@@ -3901,6 +3912,10 @@ def call_helper_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if not helper_type:
         raise ValueError("helper_type is required")
     action = args.get("action") or ("update" if args.get("helper_id") or args.get("id") else "create")
+    if helper_type in FLOW_HELPER_TYPES or helper_type == "config_subentry":
+        return call_flow_helper_tool(helper_type, action, args)
+    if helper_type not in SIMPLE_HELPER_TYPES:
+        raise ValueError(f"Unsupported helper_type {helper_type}; simple helpers: {sorted(SIMPLE_HELPER_TYPES)}, flow helpers: {sorted(FLOW_HELPER_TYPES)}")
     message: dict[str, Any] = {"type": f"{helper_type}/{action}"}
     helper_id = args.get("helper_id") or args.get("id")
     if helper_id:
@@ -3915,6 +3930,85 @@ def call_helper_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         if values is not None:
             message[key] = values
     return {"success": True, "helper_type": helper_type, "action": action, "result": ws_result(message)}
+
+
+def helper_user_input(args: dict[str, Any], include_name: bool = True) -> dict[str, Any]:
+    data = dict(args.get("config") or {})
+    if include_name and args.get("name") and "name" not in data:
+        data["name"] = args["name"]
+    for key in ("icon", "unit_of_measurement", "device_class", "state_class", "state", "availability", "entity_id"):
+        if key in args and key not in data:
+            data[key] = args[key]
+    return data
+
+
+def flow_submit(flow_base: str, flow_id: str, user_input: dict[str, Any]) -> Any:
+    return ha_request("POST", f"{flow_base}/{flow_id}", user_input)
+
+
+def call_flow_helper_tool(helper_type: str, action: str, args: dict[str, Any]) -> dict[str, Any]:
+    dry_run = bool(args.get("dry_run"))
+    config = dict(args.get("config") or {})
+    if helper_type == "config_subentry":
+        entry_id = args.get("entry_id")
+        subentry_type = args.get("subentry_type")
+        if not entry_id or not subentry_type:
+            raise ValueError("config_subentry requires entry_id and subentry_type")
+        start_endpoint = "/config/config_entries/subentries/flow"
+        start_payload = {"handler": [entry_id, subentry_type]}
+        if args.get("subentry_id"):
+            start_payload["subentry_id"] = args["subentry_id"]
+        flow_base = "/config/config_entries/subentries/flow"
+        user_input = helper_user_input(args, include_name=True)
+    elif action == "update":
+        entry_id = args.get("helper_id") or args.get("id") or args.get("entry_id")
+        if not entry_id:
+            raise ValueError("flow helper update requires helper_id/id/entry_id")
+        start_endpoint = "/config/config_entries/options/flow"
+        start_payload = {"handler": entry_id}
+        flow_base = "/config/config_entries/options/flow"
+        user_input = helper_user_input(args, include_name=False)
+    elif action == "create":
+        start_endpoint = "/config/config_entries/flow"
+        start_payload = {"handler": helper_type}
+        if args.get("show_advanced_options") is not None:
+            start_payload["show_advanced_options"] = bool(args.get("show_advanced_options"))
+        flow_base = "/config/config_entries/flow"
+        user_input = helper_user_input(args, include_name=True)
+    else:
+        raise ValueError(f"Unsupported flow helper action {action}")
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "helper_type": helper_type,
+            "action": action,
+            "transport": "rest_config_flow",
+            "start": {"method": "POST", "endpoint": start_endpoint, "data": start_payload},
+            "flow_submit_endpoint": f"{flow_base}/<flow_id>",
+            "user_input": user_input,
+        }
+    first = ha_request("POST", start_endpoint, start_payload)
+    steps = [first]
+    current = first
+    if current.get("type") == "menu":
+        next_step_id = config.pop("next_step_id", None) or config.pop("type", None) or config.pop("platform", None)
+        if not next_step_id:
+            return {"success": False, "helper_type": helper_type, "action": action, "transport": "rest_config_flow", "needs_step": True, "menu_options": current.get("menu_options"), "flow": current}
+        current = flow_submit(flow_base, current["flow_id"], {"next_step_id": next_step_id})
+        steps.append(current)
+        user_input = helper_user_input({**args, "config": config}, include_name=True)
+    if current.get("type") == "form" and user_input:
+        current = flow_submit(flow_base, current["flow_id"], user_input)
+        steps.append(current)
+    return {
+        "success": current.get("type") in {"create_entry", "abort"},
+        "helper_type": helper_type,
+        "action": action,
+        "transport": "rest_config_flow",
+        "result": current,
+        "steps": steps,
+    }
 
 
 def call_energy_tool(args: dict[str, Any]) -> dict[str, Any]:
@@ -6685,11 +6779,21 @@ def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
         return False
     if args.get("card_type") and row.get("type") != args["card_type"]:
         return False
-    if args.get("entity") and args["entity"] not in row.get("entities", []):
+    wanted_entity = str(args.get("entity") or "")
+    row_entities = [str(entity) for entity in row.get("entities", [])]
+    if wanted_entity and wanted_entity not in row_entities:
         return False
     query = str(args.get("query") or "").lower()
-    if query and not contains_text(row.get("card"), query):
-        return False
+    if query:
+        haystack = [
+            str(row.get("path") or ""),
+            str(row.get("type") or ""),
+            str(row.get("title") or ""),
+            " ".join(row_entities),
+            json.dumps(row.get("card"), default=str, sort_keys=True),
+        ]
+        if not any(query in item.lower() for item in haystack):
+            return False
     return True
 
 
