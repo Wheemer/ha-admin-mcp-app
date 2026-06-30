@@ -109,6 +109,10 @@ def load_options() -> dict[str, Any]:
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
         "native_toolset": os.environ.get("NATIVE_TOOLSET", "full"),
+        "frigate_url": os.environ.get("FRIGATE_URL", ""),
+        "go2rtc_url": os.environ.get("GO2RTC_URL", ""),
+        "target_label": os.environ.get("TARGET_LABEL", ""),
+        "target_host_hint": os.environ.get("TARGET_HOST_HINT", ""),
     }
 
 
@@ -163,6 +167,36 @@ def get_supervisor_token() -> str:
             if value:
                 return value
     raise RuntimeError("SUPERVISOR_TOKEN/HASSIO_TOKEN is not available")
+
+
+def subprocess_env(include_supervisor_token: bool = True) -> dict[str, str]:
+    env = dict(os.environ)
+    if include_supervisor_token and not env.get("SUPERVISOR_TOKEN"):
+        try:
+            env["SUPERVISOR_TOKEN"] = get_supervisor_token()
+        except Exception:
+            pass
+    if include_supervisor_token and env.get("SUPERVISOR_TOKEN") and not env.get("HASSIO_TOKEN"):
+        env["HASSIO_TOKEN"] = env["SUPERVISOR_TOKEN"]
+    return env
+
+
+def redact_secrets(text: Any) -> Any:
+    if not isinstance(text, str):
+        return text
+    redacted = text
+    for token in (os.environ.get("SUPERVISOR_TOKEN"), os.environ.get("HASSIO_TOKEN")):
+        if token:
+            redacted = redacted.replace(token, "[REDACTED_TOKEN]")
+    try:
+        token = get_supervisor_token()
+        if token:
+            redacted = redacted.replace(token, "[REDACTED_TOKEN]")
+    except Exception:
+        pass
+    redacted = re.sub(r"([?&](?:token|auth|apikey|api_key|password|pass|access_token)=)[^&\s]+", r"\1[REDACTED]", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"(rtsp://[^:\s/@]+:)[^@\s/]+@", r"\1[REDACTED]@", redacted, flags=re.IGNORECASE)
+    return redacted
 
 
 def text_result(value: Any) -> dict[str, Any]:
@@ -616,6 +650,7 @@ TOOLS = [
             "cwd": {"type": "string"},
             "timeout": {"type": "integer", "minimum": 1, "maximum": 3600},
             "max_output_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+            "echo_command": {"type": "boolean", "description": "Default false. Set true only when it is safe for the command text to be returned."},
         },
         ["command"],
     ),
@@ -628,6 +663,7 @@ TOOLS = [
             "cwd": {"type": "string"},
             "timeout": {"type": "integer", "minimum": 1, "maximum": 3600},
             "max_output_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+            "echo_command": {"type": "boolean", "description": "Default false. Set true only when it is safe for the command text to be returned."},
         },
         ["command"],
     ),
@@ -782,6 +818,12 @@ TOOLS = [
         ["path"],
     ),
     tool_schema(
+        "inspect_media_file",
+        "Inspect a local media/image file with magic bytes, file(1), Pillow image metadata, and ffprobe when available",
+        {"path": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1000000}},
+        ["path"],
+    ),
+    tool_schema(
         "ha_api",
         "Call the Home Assistant REST API through the Supervisor token. endpoint accepts either states/sensor.x or /api/states/sensor.x; /api is normalized away.",
         {"method": {"type": "string"}, "endpoint": {"type": "string", "description": "HA REST path with or without /api prefix, e.g. states/sensor.temp or /api/states/sensor.temp"}, "data": {"type": "object"}},
@@ -845,6 +887,20 @@ TOOLS = [
         },
         ["slug", "action"],
     ),
+    tool_schema("addon_info", "Return Supervisor add-on info by slug", {"slug": {"type": "string"}}, ["slug"]),
+    tool_schema("addon_logs", "Return Supervisor add-on logs by slug", {"slug": {"type": "string"}}, ["slug"]),
+    tool_schema(
+        "addon_control",
+        "Start, stop, restart, rebuild, update, install, or uninstall a Supervisor add-on by slug",
+        {"slug": {"type": "string"}, "action": {"type": "string", "enum": ["start", "stop", "restart", "rebuild", "update", "install", "uninstall"]}},
+        ["slug", "action"],
+    ),
+    tool_schema(
+        "addon_options",
+        "Get or merge Supervisor add-on options/network settings by slug",
+        {"slug": {"type": "string"}, "options": {"type": "object"}, "network": {"type": "object"}, "dry_run": {"type": "boolean"}},
+        ["slug"],
+    ),
     tool_schema("restart_core", "Restart Home Assistant Core through Supervisor. Requires force=true.", {"force": {"type": "boolean", "description": "Required safety gate. Must be true to restart Core.", "default": False}}, []),
     tool_schema("stop_core", "Stop Home Assistant Core through Supervisor. Requires force=true.", {"force": {"type": "boolean", "description": "Required safety gate. Must be true to stop Core.", "default": False}}, []),
     tool_schema("start_core", "Start Home Assistant Core through Supervisor", {}, []),
@@ -880,8 +936,12 @@ TOOLS = [
     ),
     tool_schema(
         "get_states",
-        "Return all Home Assistant states or one entity state",
-        {"entity_id": {"type": "string"}},
+        "Return all Home Assistant states, one entity state, or a batch of entity states",
+        {
+            "entity_id": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+            "entity_ids": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+            "missing_ok": {"type": "boolean"},
+        },
         [],
     ),
     tool_schema(
@@ -962,6 +1022,7 @@ TOOLS = [
     tool_schema("get_trace", "Read one Home Assistant automation or script trace by run_id through the live WebSocket trace/get API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "run_id": {"type": "string"}, "latest": {"type": "boolean"}}, ["domain"]),
     tool_schema("list_trace_contexts", "List Home Assistant automation or script trace contexts through the live WebSocket trace/contexts API", {"domain": {"type": "string", "enum": ["automation", "script"]}, "entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}}, ["domain"]),
     tool_schema("get_automation_traces", "List automation traces and optionally fetch a specific or latest run", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "run_id": {"type": "string"}, "latest": {"type": "boolean"}, "include_trace": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("test_automation_trace", "Optionally trigger one automation, then fetch latest trace and summarize run state", {"entity_id": {"type": "string"}, "id": {"type": "string"}, "item_id": {"type": "string"}, "skip_condition": {"type": "boolean"}, "trigger": {"type": "boolean"}, "wait_seconds": {"type": "number", "minimum": 0, "maximum": 30}}, []),
     tool_schema("active_config_index", "Return a compact index of the active /config tree, packages, blueprints, templates, and key YAML files", {"limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
     tool_schema("search_active_config", "Search active /config YAML, package, template, and blueprint files with /config or relative paths accepted", {"query": {"type": "string"}, "path": {"type": "string"}, "filename": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
     tool_schema("list_template_configs", "Find template configuration blocks in templates.yaml, configuration.yaml, and package YAML", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
@@ -1505,6 +1566,17 @@ TOOLS = [
         [],
     ),
     tool_schema("recorder_get_db_info", "Return recorder database file size, tables, and key row counts", {}, []),
+    tool_schema("frigate_get_config", "Read Frigate config through the Frigate API", {"base_url": {"type": "string"}, "raw": {"type": "boolean"}}, []),
+    tool_schema("frigate_save_config", "Save Frigate raw YAML config through the Frigate API. Requires force=true unless dry_run=true.", {"base_url": {"type": "string"}, "config": {"type": "string"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean", "default": False}}, ["config"]),
+    tool_schema("frigate_validate_config", "Validate Frigate config through the Frigate API when available", {"base_url": {"type": "string"}, "config": {"type": "string"}}, []),
+    tool_schema("frigate_restart", "Restart Frigate through its API. Requires force=true.", {"base_url": {"type": "string"}, "force": {"type": "boolean", "default": False}}, []),
+    tool_schema("frigate_stats", "Fetch Frigate stats through the Frigate API", {"base_url": {"type": "string"}}, []),
+    tool_schema("frigate_logs", "Fetch Frigate logs through the Frigate API", {"base_url": {"type": "string"}, "service": {"type": "string"}, "lines": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
+    tool_schema("frigate_event_snapshot", "Fetch metadata for a Frigate event snapshot URL", {"base_url": {"type": "string"}, "event_id": {"type": "string"}}, ["event_id"]),
+    tool_schema("go2rtc_streams", "List go2rtc streams from go2rtc or Frigate's go2rtc API", {"base_url": {"type": "string"}}, []),
+    tool_schema("go2rtc_reload", "Reload go2rtc through its API when available. Requires force=true.", {"base_url": {"type": "string"}, "force": {"type": "boolean", "default": False}}, []),
+    tool_schema("go2rtc_probe_stream", "Probe a go2rtc stream or source URL with ffprobe when available", {"stream": {"type": "string"}, "url": {"type": "string"}, "base_url": {"type": "string"}, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}}, []),
+    tool_schema("camera_path_health", "Summarize HA camera state, Frigate stats, go2rtc stream presence, and optional ffprobe result for one camera path", {"camera": {"type": "string"}, "entity_id": {"type": "string"}, "stream": {"type": "string"}, "frigate_base_url": {"type": "string"}, "go2rtc_base_url": {"type": "string"}, "probe": {"type": "boolean"}}, []),
     tool_schema("list_backups", "List Home Assistant backups through Supervisor", {}, []),
     tool_schema(
         "create_backup",
@@ -1963,47 +2035,53 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
-        audit_event("run_command", {"command": args["command"], "cwd": args.get("cwd")})
+        audit_event("run_command", {"command": redact_secrets(args["command"]), "cwd": args.get("cwd")})
         completed = subprocess.run(
             args["command"],
             cwd=args.get("cwd") or None,
             shell=True,
+            env=subprocess_env(),
             text=True,
             capture_output=True,
             timeout=timeout,
         )
-        return {
-            "command": args["command"],
+        result = {
             "cwd": args.get("cwd"),
             "returncode": completed.returncode,
-            "stdout": completed.stdout[:max_output],
-            "stderr": completed.stderr[:max_output],
+            "stdout": redact_secrets(completed.stdout[:max_output]),
+            "stderr": redact_secrets(completed.stderr[:max_output]),
             "stdout_truncated": len(completed.stdout) > max_output,
             "stderr_truncated": len(completed.stderr) > max_output,
         }
+        if bool(args.get("echo_command")):
+            result["command"] = redact_secrets(args["command"])
+        return result
     if name == "run_shell":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
         max_output = int(args.get("max_output_bytes") or 20000)
-        audit_event("run_shell", {"command": args["command"], "shell": args.get("shell"), "cwd": args.get("cwd")})
+        audit_event("run_shell", {"command": redact_secrets(args["command"]), "shell": args.get("shell"), "cwd": args.get("cwd")})
         completed = subprocess.run(
             args["command"],
             cwd=args.get("cwd") or None,
             shell=True,
             executable=args.get("shell") or None,
+            env=subprocess_env(),
             text=True,
             capture_output=True,
             timeout=timeout,
         )
-        return {
-            "command": args["command"],
+        result = {
             "shell": args.get("shell"),
             "cwd": args.get("cwd"),
             "returncode": completed.returncode,
-            "stdout": completed.stdout[:max_output],
-            "stderr": completed.stderr[:max_output],
+            "stdout": redact_secrets(completed.stdout[:max_output]),
+            "stderr": redact_secrets(completed.stderr[:max_output]),
             "stdout_truncated": len(completed.stdout) > max_output,
             "stderr_truncated": len(completed.stderr) > max_output,
         }
+        if bool(args.get("echo_command")):
+            result["command"] = redact_secrets(args["command"])
+        return result
     if name == "get_environment":
         return get_environment(bool(args.get("include_values")))
     if name == "get_target_identity":
@@ -2084,6 +2162,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return glob_paths(args["pattern"], int(args.get("limit") or 500))
     if name == "hash_file":
         return hash_file(visible_path(args.get("path")), args.get("algorithm") or "sha256")
+    if name == "inspect_media_file":
+        return inspect_media_file(args)
     if name == "ha_api":
         if str(args.get("method", "GET")).upper() not in ("GET", "HEAD", "OPTIONS"):
             audit_event("ha_api", {"method": args.get("method", "GET"), "endpoint": args["endpoint"]})
@@ -2117,6 +2197,17 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
             return self_update_not_supported(str(args["slug"]), str(args["action"]))
         audit_event("app_control", {"slug": args["slug"], "action": args["action"]})
         return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
+    if name == "addon_info":
+        return supervisor_request("GET", f"/addons/{args['slug']}/info")
+    if name == "addon_logs":
+        return supervisor_request("GET", f"/addons/{args['slug']}/logs")
+    if name == "addon_control":
+        if is_self_addon_slug(args.get("slug")) and args.get("action") in SELF_UPDATE_ACTIONS:
+            return self_update_not_supported(str(args["slug"]), str(args["action"]))
+        audit_event("addon_control", {"slug": args["slug"], "action": args["action"]})
+        return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
+    if name == "addon_options":
+        return addon_options(args)
     if name == "restart_core":
         if not bool(args.get("force")):
             raise ValueError("restart_core requires force=true")
@@ -2144,8 +2235,7 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         audit_event("call_service", {"domain": args["domain"], "service": args["service"], "data": args.get("data") or {}})
         return ha_request("POST", f"/services/{args['domain']}/{args['service']}", args.get("data") or {})
     if name == "get_states":
-        entity_id = args.get("entity_id")
-        return ha_request("GET", f"/states/{entity_id}" if entity_id else "/states")
+        return get_states(args)
     if name == "get_entity":
         return get_entity(args)
     if name == "entity_action":
@@ -2204,6 +2294,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return list_trace_contexts(args)
     if name == "get_automation_traces":
         return get_automation_traces(args)
+    if name == "test_automation_trace":
+        return test_automation_trace(args)
     if name == "active_config_index":
         return active_config_index(args)
     if name == "search_active_config":
@@ -2371,6 +2463,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return recorder_purge_entities(args)
     if name == "recorder_get_db_info":
         return recorder_get_db_info()
+    if name.startswith("frigate_"):
+        return call_frigate_tool(name, args)
+    if name.startswith("go2rtc_"):
+        return call_go2rtc_tool(name, args)
+    if name == "camera_path_health":
+        return camera_path_health(args)
     if name == "list_backups":
         return supervisor_request("GET", "/backups")
     if name == "create_backup":
@@ -2462,6 +2560,8 @@ def get_target_identity() -> dict[str, Any]:
     host = supervisor_request("GET", "/host/info")
     return {
         "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
+        "target_label": OPTIONS.get("target_label") or "",
+        "target_host_hint": OPTIONS.get("target_host_hint") or "",
         "core": core.get("data", core) if isinstance(core, dict) else core,
         "supervisor": supervisor.get("data", supervisor) if isinstance(supervisor, dict) else supervisor,
         "host": host.get("data", host) if isinstance(host, dict) else host,
@@ -2645,6 +2745,7 @@ def mcp_protocol_status() -> dict[str, Any]:
     implemented = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
     return {
         "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
+        "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
         "transport": {
             "kind": "streamable_http_json",
             "post": True,
@@ -3093,6 +3194,44 @@ def get_automation_traces(args: dict[str, Any]) -> dict[str, Any]:
         run_id = result["traces"][0].get("run_id")
     if run_id:
         result["trace"] = get_trace({"domain": "automation", "item_id": listed.get("item_id"), "run_id": run_id})
+    return result
+
+
+def trace_summary(trace: Any) -> dict[str, Any]:
+    if not isinstance(trace, dict):
+        return {}
+    payload = trace.get("trace") if isinstance(trace.get("trace"), dict) else trace
+    state = trace.get("state") or payload.get("state")
+    error = trace.get("error") or payload.get("error")
+    last_step = None
+    if isinstance(payload.get("trace"), dict) and payload["trace"]:
+        keys = sorted(payload["trace"].keys())
+        last_step = keys[-1] if keys else None
+    return {"state": state, "error": error, "last_step": last_step}
+
+
+def test_automation_trace(args: dict[str, Any]) -> dict[str, Any]:
+    entity_id = args.get("entity_id")
+    if not entity_id and args.get("id"):
+        entity_id = str(args["id"])
+        if not entity_id.startswith("automation."):
+            entity_id = f"automation.{entity_id}"
+    result: dict[str, Any] = {"entity_id": entity_id, "triggered": False}
+    if bool(args.get("trigger")):
+        if not entity_id:
+            raise ValueError("entity_id or id is required when trigger=true")
+        data = {"entity_id": entity_id, "skip_condition": bool(args.get("skip_condition", True))}
+        audit_event("test_automation_trace.trigger", data)
+        result["trigger_result"] = ha_request("POST", "/services/automation/trigger", data)
+        result["triggered"] = True
+        wait = float(args.get("wait_seconds") or 1.0)
+        if wait > 0:
+            time.sleep(min(wait, 30))
+    trace_args = {"entity_id": entity_id, "id": args.get("id"), "item_id": args.get("item_id"), "latest": True, "include_trace": True, "limit": 5}
+    traces = get_automation_traces({key: value for key, value in trace_args.items() if value not in (None, "")})
+    result["traces"] = traces
+    if isinstance(traces.get("trace"), dict):
+        result["summary"] = trace_summary(traces["trace"].get("trace", traces["trace"]))
     return result
 
 
@@ -4987,6 +5126,36 @@ def hash_file(path: Path, algorithm: str) -> dict[str, Any]:
     return {"path": str(path), "algorithm": algorithm, "hexdigest": digest.hexdigest(), "size": path.stat().st_size}
 
 
+def inspect_media_file(args: dict[str, Any]) -> dict[str, Any]:
+    path = visible_path(args.get("path"))
+    max_bytes = int(args.get("max_bytes") or 64)
+    info: dict[str, Any] = path_info(path)
+    if not path.exists() or not path.is_file():
+        return info
+    with path.open("rb") as handle:
+        head = handle.read(max_bytes)
+    info["magic_hex"] = head[:64].hex()
+    info["magic_ascii"] = "".join(chr(byte) if 32 <= byte < 127 else "." for byte in head[:64])
+    if shutil.which("file"):
+        completed = subprocess.run(["file", "--brief", "--mime", str(path)], text=True, capture_output=True, timeout=10)
+        info["file_mime"] = completed.stdout.strip()
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            info["image"] = {"format": image.format, "mode": image.mode, "size": list(image.size)}
+    except Exception as err:
+        info["image_error"] = str(err)
+    if shutil.which("ffprobe"):
+        try:
+            completed = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)], text=True, capture_output=True, timeout=20)
+            info["ffprobe"] = parse_maybe_json(completed.stdout)
+            if completed.stderr:
+                info["ffprobe_stderr"] = completed.stderr.strip()
+        except Exception as err:
+            info["ffprobe_error"] = str(err)
+    return info
+
+
 def read_file_window(path: Path, offset: int, length: int) -> dict[str, Any]:
     size = path.stat().st_size
     offset = max(0, min(offset, size))
@@ -5456,6 +5625,53 @@ def ha_cli(args: dict[str, Any]) -> dict[str, Any]:
         "stdout_truncated": len(completed.stdout) > max_output,
         "stderr_truncated": len(completed.stderr) > max_output,
     }
+
+
+def get_states(args: dict[str, Any]) -> Any:
+    raw = args.get("entity_ids", args.get("entity_id"))
+    if raw in (None, ""):
+        return ha_request("GET", "/states")
+    entity_ids = parse_string_list(raw, "entity_id") or []
+    if len(entity_ids) == 1:
+        try:
+            return ha_request("GET", f"/states/{entity_ids[0]}")
+        except RuntimeError:
+            if bool(args.get("missing_ok")):
+                return {"entity_id": entity_ids[0], "missing": True}
+            raise
+    rows = []
+    errors = []
+    for entity_id in entity_ids:
+        try:
+            rows.append(ha_request("GET", f"/states/{entity_id}"))
+        except RuntimeError as err:
+            if not bool(args.get("missing_ok")):
+                raise
+            errors.append({"entity_id": entity_id, "error": str(err), "missing": True})
+    return {"count": len(rows), "states": rows, "errors": errors}
+
+
+def addon_options(args: dict[str, Any]) -> dict[str, Any]:
+    info = supervisor_request("GET", f"/addons/{args['slug']}/info")
+    current = info.get("data", info) if isinstance(info, dict) else {}
+    existing_options = dict(current.get("options") or {})
+    existing_network = dict(current.get("network") or {})
+    if args.get("options") is None and args.get("network") is None:
+        return {"slug": args["slug"], "options": existing_options, "network": existing_network, "info": current}
+    payload: dict[str, Any] = {
+        "options": existing_options | dict(args.get("options") or {}),
+    }
+    if args.get("network") is not None or existing_network:
+        payload["network"] = existing_network | dict(args.get("network") or {})
+    for key in ("boot", "auto_update", "watchdog"):
+        if key in current:
+            payload[key] = current[key]
+    result = {"slug": args["slug"], "payload": payload, "dry_run": bool(args.get("dry_run"))}
+    if bool(args.get("dry_run")):
+        return result
+    audit_event("addon_options", {"slug": args["slug"], "keys": sorted((args.get("options") or {}).keys())})
+    result["result"] = supervisor_request("POST", f"/addons/{args['slug']}/options", payload)
+    return result
 
 
 def check_config_and_reload(args: dict[str, Any]) -> dict[str, Any]:
@@ -6157,6 +6373,192 @@ def recorder_purge_entities(args: dict[str, Any]) -> dict[str, Any]:
         return {"service": "recorder.purge_entities", "data": data, "dry_run": True}
     audit_event("recorder_purge_entities", data)
     return ha_request("POST", "/services/recorder/purge_entities", data)
+
+
+def http_api_request(base_url: str, path: str, method: str = "GET", data: Any | None = None, timeout: int = 30, accept_json: bool = True) -> Any:
+    url = base_url.rstrip("/") + "/" + path.lstrip("/")
+    body = None
+    headers = {"User-Agent": "ha-admin-mcp"}
+    if data is not None:
+        if isinstance(data, (dict, list)):
+            body = json.dumps(data).encode()
+            headers["Content-Type"] = "application/json"
+        elif isinstance(data, str):
+            body = data.encode()
+            headers["Content-Type"] = "text/plain"
+        else:
+            body = data
+    request = urllib.request.Request(url, data=body, method=method.upper(), headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = response.read()
+        content_type = response.headers.get("Content-Type", "")
+        status = response.status
+    text = payload.decode("utf-8", errors="replace")
+    if accept_json and ("json" in content_type or text[:1] in ("{", "[")):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+    return {"status": status, "content_type": content_type, "text": text, "bytes": len(payload)}
+
+
+def first_working_base(candidates: list[str], probe_path: str) -> tuple[str, Any]:
+    errors = []
+    for base in candidates:
+        if not base:
+            continue
+        try:
+            return base.rstrip("/"), http_api_request(base, probe_path, timeout=5)
+        except Exception as err:
+            errors.append({"base_url": base, "error": str(err)})
+    raise RuntimeError(f"No working API base found for {probe_path}: {errors}")
+
+
+def frigate_base(args: dict[str, Any], probe_path: str = "/api/stats") -> tuple[str, Any]:
+    explicit = args.get("base_url") or os.environ.get("FRIGATE_URL") or OPTIONS.get("frigate_url")
+    candidates = [
+        explicit,
+        "http://ccab4aaf-frigate:5000",
+        "http://ccab4aaf_frigate:5000",
+        "http://frigate:5000",
+        "http://localhost:5000",
+    ]
+    return first_working_base([str(item) for item in candidates if item], probe_path)
+
+
+def go2rtc_base(args: dict[str, Any], probe_path: str = "/api/streams") -> tuple[str, Any]:
+    explicit = args.get("base_url") or os.environ.get("GO2RTC_URL") or OPTIONS.get("go2rtc_url")
+    candidates = [
+        explicit,
+        "http://ccab4aaf-frigate:1984",
+        "http://ccab4aaf_frigate:1984",
+        "http://go2rtc:1984",
+        "http://localhost:1984",
+    ]
+    return first_working_base([str(item) for item in candidates if item], probe_path)
+
+
+def call_frigate_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "frigate_get_config":
+        base, _ = frigate_base(args, "/api/config")
+        raw = bool(args.get("raw", True))
+        path = "/api/config/raw" if raw else "/api/config"
+        return {"base_url": base, "config": http_api_request(base, path, accept_json=not raw)}
+    if name == "frigate_save_config":
+        if not bool(args.get("dry_run")) and not bool(args.get("force")):
+            raise ValueError("frigate_save_config requires force=true")
+        base, _ = frigate_base(args, "/api/config")
+        payload = str(args["config"])
+        if bool(args.get("dry_run")):
+            return {"base_url": base, "dry_run": True, "bytes": len(payload.encode())}
+        audit_event("frigate_save_config", {"base_url": base, "bytes": len(payload.encode())})
+        return {"base_url": base, "result": http_api_request(base, "/api/config/save", method="POST", data=payload)}
+    if name == "frigate_validate_config":
+        base, _ = frigate_base(args, "/api/config")
+        if args.get("config") is not None:
+            return {"base_url": base, "result": http_api_request(base, "/api/config/validate", method="POST", data=str(args["config"]))}
+        return {"base_url": base, "result": http_api_request(base, "/api/config/validate")}
+    if name == "frigate_restart":
+        if not bool(args.get("force")):
+            raise ValueError("frigate_restart requires force=true")
+        base, _ = frigate_base(args, "/api/stats")
+        audit_event("frigate_restart", {"base_url": base})
+        return {"base_url": base, "result": http_api_request(base, "/api/restart", method="POST")}
+    if name == "frigate_stats":
+        base, stats = frigate_base(args, "/api/stats")
+        return {"base_url": base, "stats": stats}
+    if name == "frigate_logs":
+        base, _ = frigate_base(args, "/api/stats")
+        service = str(args.get("service") or "frigate")
+        result = http_api_request(base, f"/api/logs/{urllib.parse.quote(service)}")
+        lines = int(args.get("lines") or 200)
+        if isinstance(result, dict) and isinstance(result.get("text"), str):
+            result["text"] = "\n".join(result["text"].splitlines()[-lines:])
+        return {"base_url": base, "service": service, "logs": result}
+    if name == "frigate_event_snapshot":
+        base, _ = frigate_base(args, "/api/stats")
+        event_id = urllib.parse.quote(str(args["event_id"]))
+        return {"base_url": base, "snapshot_url": f"{base}/api/events/{event_id}/snapshot.jpg"}
+    raise ValueError(f"Unsupported Frigate tool {name}")
+
+
+def call_go2rtc_tool(name: str, args: dict[str, Any]) -> Any:
+    if name == "go2rtc_streams":
+        base, streams = go2rtc_base(args, "/api/streams")
+        return {"base_url": base, "streams": streams}
+    if name == "go2rtc_reload":
+        if not bool(args.get("force")):
+            raise ValueError("go2rtc_reload requires force=true")
+        base, _ = go2rtc_base(args, "/api/streams")
+        audit_event("go2rtc_reload", {"base_url": base})
+        for path in ("/api/reload", "/api/restart"):
+            try:
+                return {"base_url": base, "path": path, "result": http_api_request(base, path, method="POST")}
+            except Exception:
+                continue
+        raise RuntimeError("go2rtc reload/restart endpoint was not accepted")
+    if name == "go2rtc_probe_stream":
+        timeout = int(args.get("timeout") or 15)
+        source = args.get("url")
+        streams_payload = None
+        if not source and args.get("stream"):
+            base, streams_payload = go2rtc_base(args, "/api/streams")
+            stream_name = str(args["stream"])
+            streams = streams_payload if isinstance(streams_payload, dict) else {}
+            source_data = streams.get(stream_name)
+            if isinstance(source_data, dict):
+                source = source_data.get("src") or source_data.get("remote_addr") or source_data.get("url")
+            elif isinstance(source_data, list) and source_data:
+                source = source_data[0]
+        if not source:
+            raise ValueError("Pass url or a stream name resolvable from go2rtc_streams")
+        if shutil.which("ffprobe") is None:
+            return {"available": False, "error": "ffprobe is not installed in this add-on image", "source": redact_secrets(str(source)), "streams": streams_payload}
+        completed = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source)],
+            env=subprocess_env(),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        parsed = parse_maybe_json(completed.stdout)
+        return {"available": True, "source": redact_secrets(str(source)), "returncode": completed.returncode, "stdout": parsed, "stderr": redact_secrets(completed.stderr)}
+    raise ValueError(f"Unsupported go2rtc tool {name}")
+
+
+def camera_path_health(args: dict[str, Any]) -> dict[str, Any]:
+    camera = args.get("camera") or args.get("stream") or args.get("entity_id")
+    entity_id = args.get("entity_id") or (str(camera) if str(camera or "").startswith("camera.") else None)
+    stream_name = args.get("stream") or (str(camera).split(".", 1)[-1] if camera else None)
+    result: dict[str, Any] = {"camera": camera, "entity_id": entity_id, "stream": stream_name, "checks": {}}
+    if entity_id:
+        try:
+            result["checks"]["ha_state"] = ha_request("GET", f"/states/{entity_id}")
+        except Exception as err:
+            result["checks"]["ha_state_error"] = str(err)
+    try:
+        base, stats = frigate_base({"base_url": args.get("frigate_base_url")}, "/api/stats")
+        result["frigate_base_url"] = base
+        cameras = stats.get("cameras") if isinstance(stats, dict) else None
+        if stream_name and isinstance(cameras, dict):
+            result["checks"]["frigate_camera"] = cameras.get(stream_name)
+        result["checks"]["frigate_stats_available"] = True
+    except Exception as err:
+        result["checks"]["frigate_error"] = str(err)
+    try:
+        base, streams = go2rtc_base({"base_url": args.get("go2rtc_base_url")}, "/api/streams")
+        result["go2rtc_base_url"] = base
+        if stream_name and isinstance(streams, dict):
+            result["checks"]["go2rtc_stream"] = streams.get(stream_name)
+        result["checks"]["go2rtc_streams_available"] = True
+    except Exception as err:
+        result["checks"]["go2rtc_error"] = str(err)
+    if bool(args.get("probe")) and stream_name:
+        try:
+            result["checks"]["probe"] = call_go2rtc_tool("go2rtc_probe_stream", {"stream": stream_name, "base_url": args.get("go2rtc_base_url")})
+        except Exception as err:
+            result["checks"]["probe_error"] = str(err)
+    return result
 
 
 def create_backup(args: dict[str, Any]) -> Any:

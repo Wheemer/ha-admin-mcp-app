@@ -3,8 +3,8 @@ FROM ${BUILD_FROM}
 
 WORKDIR /app
 
-RUN apk add --no-cache findutils tar
-RUN pip3 install --no-cache-dir fastmcp==3.4.2
+RUN apk add --no-cache ffmpeg file findutils tar
+RUN pip3 install --no-cache-dir fastmcp==3.4.2 pillow
 
 COPY src /app/src
 COPY config.yaml /app/config.yaml
