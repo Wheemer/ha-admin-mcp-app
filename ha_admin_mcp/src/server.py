@@ -19,6 +19,7 @@ import urllib.parse
 import uuid
 import glob
 import hashlib
+import functools
 import socket
 import struct
 from datetime import datetime, timedelta, timezone
@@ -352,12 +353,12 @@ def read_bytes_limited(path: Path, max_bytes: int = MAX_READ_BYTES) -> tuple[byt
     return data, truncated
 
 
-def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> Any:
+def json_api_request(label: str, base_url: str, method: str, endpoint: str, data: Any | None = None) -> Any:
     token = get_supervisor_token()
     endpoint = "/" + endpoint.lstrip("/")
     body = None if data is None else json.dumps(data).encode()
     request = urllib.request.Request(
-        f"http://supervisor{endpoint}",
+        f"{base_url}{endpoint}",
         data=body,
         method=method.upper(),
         headers={
@@ -376,7 +377,11 @@ def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> A
                 return {"status": response.status, "content": payload}
     except urllib.error.HTTPError as err:
         payload = err.read().decode(errors="replace")
-        raise RuntimeError(f"Supervisor API {err.code}: {payload}") from err
+        raise RuntimeError(f"{label} {err.code}: {payload}") from err
+
+
+def supervisor_request(method: str, endpoint: str, data: Any | None = None) -> Any:
+    return json_api_request("Supervisor API", "http://supervisor", method, endpoint, data)
 
 
 def maybe_query(endpoint: str, query: dict[str, Any]) -> str:
@@ -397,30 +402,7 @@ def normalize_ha_api_endpoint(endpoint: str) -> str:
 
 
 def ha_request(method: str, endpoint: str, data: Any | None = None) -> Any:
-    token = get_supervisor_token()
-    endpoint = normalize_ha_api_endpoint(endpoint)
-    body = None if data is None else json.dumps(data).encode()
-    request = urllib.request.Request(
-        f"http://supervisor/core/api{endpoint}",
-        data=body,
-        method=method.upper(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            payload = response.read().decode()
-            if not payload:
-                return {"status": response.status}
-            try:
-                return json.loads(payload)
-            except json.JSONDecodeError:
-                return {"status": response.status, "content": payload}
-    except urllib.error.HTTPError as err:
-        payload = err.read().decode(errors="replace")
-        raise RuntimeError(f"Home Assistant API {err.code}: {payload}") from err
+    return json_api_request("Home Assistant API", "http://supervisor/core/api", method, normalize_ha_api_endpoint(endpoint), data)
 
 
 def ws_read_exact(sock: socket.socket, size: int) -> bytes:
@@ -1968,6 +1950,10 @@ HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS = [
 
 TOOLS.extend(UPSTREAM_COMPAT_TOOL_SCHEMAS)
 TOOLS.extend(HA_ADMIN_COMPAT_EXTENSION_TOOL_SCHEMAS)
+TOOL_BY_NAME = {tool["name"]: tool for tool in TOOLS}
+TOOL_NAMES = frozenset(TOOL_BY_NAME)
+IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET = frozenset(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
+HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET = frozenset(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES)
 
 
 BOOTSTRAP_NATIVE_TOOL_NAMES = {
@@ -1988,21 +1974,23 @@ def native_toolset_mode() -> str:
     return mode if mode in {"bootstrap", "standard", "upstream", "full"} else "standard"
 
 
+@functools.lru_cache(maxsize=1)
 def native_tool_names() -> set[str]:
     mode = native_toolset_mode()
     if mode == "full":
-        return {tool["name"] for tool in TOOLS}
-    names = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
+        return set(TOOL_NAMES)
+    names = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET)
     if mode == "upstream":
         return names
     names |= BOOTSTRAP_NATIVE_TOOL_NAMES
     if mode == "standard":
-        names |= set(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES)
+        names |= set(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET)
     if mode == "bootstrap":
         names = set(BOOTSTRAP_NATIVE_TOOL_NAMES)
     return names
 
 
+@functools.lru_cache(maxsize=1)
 def native_tools() -> list[dict[str, Any]]:
     names = native_tool_names()
     return [tool for tool in TOOLS if tool["name"] in names]
@@ -2079,7 +2067,7 @@ PROMPTS = [
 
 
 def call_tool(name: str, args: dict[str, Any]) -> Any:
-    if name in IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES or name in HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES:
+    if name in IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET or name in HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET:
         return call_upstream_compat_tool(name, args)
     if name == "run_command":
         timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
@@ -2239,24 +2227,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return supervisor_request("GET", "/supervisor/info")
     if name == "store_info":
         return supervisor_request("GET", "/store")
-    if name == "app_info":
-        return supervisor_request("GET", f"/addons/{args['slug']}/info")
-    if name == "app_logs":
-        return supervisor_request("GET", f"/addons/{args['slug']}/logs")
-    if name == "app_control":
-        if is_self_addon_slug(args.get("slug")) and args.get("action") in SELF_UPDATE_ACTIONS:
-            return self_update_not_supported(str(args["slug"]), str(args["action"]))
-        audit_event("app_control", {"slug": args["slug"], "action": args["action"]})
-        return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
-    if name == "addon_info":
-        return supervisor_request("GET", f"/addons/{args['slug']}/info")
-    if name == "addon_logs":
-        return supervisor_request("GET", f"/addons/{args['slug']}/logs")
-    if name == "addon_control":
-        if is_self_addon_slug(args.get("slug")) and args.get("action") in SELF_UPDATE_ACTIONS:
-            return self_update_not_supported(str(args["slug"]), str(args["action"]))
-        audit_event("addon_control", {"slug": args["slug"], "action": args["action"]})
-        return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
+    if name in ("app_info", "addon_info"):
+        return addon_info(args)
+    if name in ("app_logs", "addon_logs"):
+        return addon_logs(args)
+    if name in ("app_control", "addon_control"):
+        return addon_control(args, audit_name=name)
     if name == "addon_options":
         return addon_options(args)
     if name == "restart_core":
@@ -2671,6 +2647,12 @@ def tool_catalog_row(tool: dict[str, Any], include_schema: bool = False) -> dict
     return row
 
 
+@functools.lru_cache(maxsize=None)
+def tool_search_blob(name: str) -> str:
+    return json.dumps(TOOL_BY_NAME[name], default=str).lower()
+
+
+@functools.lru_cache(maxsize=1)
 def tool_catalog_fingerprint() -> str:
     payload = [
         {
@@ -2692,7 +2674,7 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     catalog = native_tools() if native_only else TOOLS
     rows = []
     for tool in catalog:
-        if query and query not in json.dumps(tool, default=str).lower():
+        if query and query not in tool_search_blob(tool["name"]):
             continue
         rows.append(tool_catalog_row(tool, include_schema))
         if len(rows) >= limit:
@@ -2791,9 +2773,8 @@ def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def mcp_protocol_status() -> dict[str, Any]:
-    tool_names = {tool["name"] for tool in TOOLS}
     exposed_tool_names = {tool["name"] for tool in native_tools()}
-    implemented = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
+    implemented = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET)
     return {
         "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
         "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
@@ -2832,15 +2813,15 @@ def mcp_protocol_status() -> dict[str, Any]:
         ],
         "tool_counts": {
             "native_exposed": len(exposed_tool_names),
-            "registered_total": len(tool_names),
+            "registered_total": len(TOOL_NAMES),
             "native_toolset": native_toolset_mode(),
             "upstream_homeassistant_ai_standard": len(UPSTREAM_HA_MCP_TOOL_NAMES),
             "upstream_homeassistant_ai_implemented": len(implemented),
-            "upstream_homeassistant_ai_implemented_missing": len(implemented - tool_names),
+            "upstream_homeassistant_ai_implemented_missing": len(implemented - TOOL_NAMES),
             "ha_admin_extensions": len(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES),
         },
         "native_exposed_tool_sample": sorted(exposed_tool_names)[:25],
-        "upstream_homeassistant_ai_implemented_missing": sorted(implemented - tool_names),
+        "upstream_homeassistant_ai_implemented_missing": sorted(implemented - TOOL_NAMES),
         "unimplemented_upstream_homeassistant_ai_tools": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
         "ha_admin_extension_tools": HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES,
     }
@@ -5737,6 +5718,21 @@ def get_states(args: dict[str, Any]) -> Any:
     return {"count": len(rows), "states": rows, "errors": errors}
 
 
+def addon_info(args: dict[str, Any]) -> Any:
+    return supervisor_request("GET", f"/addons/{args['slug']}/info")
+
+
+def addon_logs(args: dict[str, Any]) -> Any:
+    return supervisor_request("GET", f"/addons/{args['slug']}/logs")
+
+
+def addon_control(args: dict[str, Any], audit_name: str = "addon_control") -> Any:
+    if is_self_addon_slug(args.get("slug")) and args.get("action") in SELF_UPDATE_ACTIONS:
+        return self_update_not_supported(str(args["slug"]), str(args["action"]))
+    audit_event(audit_name, {"slug": args["slug"], "action": args["action"]})
+    return supervisor_request("POST", f"/addons/{args['slug']}/{args['action']}")
+
+
 def addon_options(args: dict[str, Any]) -> dict[str, Any]:
     info = supervisor_request("GET", f"/addons/{args['slug']}/info")
     current = info.get("data", info) if isinstance(info, dict) else {}
@@ -7945,8 +7941,7 @@ class Handler(BaseHTTPRequestHandler):
                 tool_name = params.get("name")
                 if not tool_name:
                     return self.rpc_error(request_id, -32602, "Tool name is required")
-                known_tool_names = {tool["name"] for tool in TOOLS}
-                if tool_name not in known_tool_names:
+                if tool_name not in TOOL_NAMES:
                     return self.rpc_error(request_id, -32602, f"Unknown tool: {tool_name}")
                 try:
                     tool_value = call_tool(tool_name, params.get("arguments") or {})
