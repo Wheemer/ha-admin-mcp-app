@@ -218,19 +218,60 @@ def public_base_url(headers: Any | None = None) -> str:
     return f"{scheme}://{host}"
 
 
+def advertised_target_label() -> str:
+    return str(OPTIONS.get("target_label") or "Home Assistant").strip() or "Home Assistant"
+
+
+def advertised_target_hint() -> str:
+    return str(OPTIONS.get("target_host_hint") or "").strip()
+
+
+def advertised_server_title() -> str:
+    label = advertised_target_label()
+    hint = advertised_target_hint()
+    suffix = f" ({hint})" if hint and hint not in label else ""
+    return f"HA Admin MCP - {label}{suffix}"
+
+
+def advertised_server_name() -> str:
+    label = re.sub(r"[^a-z0-9]+", "_", advertised_target_label().lower()).strip("_")
+    return f"ha_admin_mcp_{label or 'home_assistant'}"
+
+
+def mcp_instructions() -> str:
+    title = advertised_server_title()
+    return (
+        f"{title}. This MCP server controls exactly this Home Assistant target. "
+        "Use get_target_identity or ha://mcp/identity before risky work if there is any ambiguity. "
+        "Use normal MCP tools/list and tools/call for discovery and execution; list_tools/search_tools are fallback catalog helpers. "
+        "Prefer direct add-on, Home Assistant, Frigate, go2rtc, Lovelace, registry, automation, and trace tools over shell commands. "
+        "This server is intentionally privileged and dangerous; writes/restarts/deletes require explicit force gates where applicable."
+    )
+
+
 def app_server_info(headers: Any | None = None) -> dict[str, Any]:
     base = public_base_url(headers)
+    title = advertised_server_title()
     return {
-        "name": "ha-admin-mcp",
-        "title": "HA Admin MCP",
+        "name": advertised_server_name(),
+        "title": title,
+        "displayName": title,
         "version": APP_VERSION,
-        "description": "Privileged Home Assistant administration MCP add-on",
+        "description": f"Privileged Home Assistant administration MCP add-on for {advertised_target_label()}",
         "icons": [
             {"src": f"{base}/icon.png", "mimeType": "image/png", "sizes": "512x512"},
             {"src": f"{base}/logo.png", "mimeType": "image/png", "sizes": "512x512"},
             {"src": f"{base}/icon.svg", "mimeType": "image/svg+xml"},
         ],
         "websiteUrl": "https://github.com/Wheemer/ha-admin-mcp-app",
+        "_meta": {
+            "targetLabel": advertised_target_label(),
+            "targetHostHint": advertised_target_hint(),
+            "endpointPath": MCP_PATH,
+            "toolCatalogHash": tool_catalog_fingerprint() if "TOOLS" in globals() else "",
+            "nativeToolCount": len(native_tools()) if "TOOLS" in globals() else 0,
+            "registeredToolCount": len(TOOLS) if "TOOLS" in globals() else 0,
+        },
     }
 
 
@@ -718,6 +759,12 @@ TOOLS = [
     tool_schema(
         "mcp_protocol_status",
         "Return MCP protocol support, endpoint metadata, and implemented upstream Home Assistant MCP tool parity",
+        {},
+        [],
+    ),
+    tool_schema(
+        "mcp_advertisement",
+        "Return the MCP initialize/serverInfo/identity metadata this add-on advertises to Codex and other MCP clients",
         {},
         [],
     ),
@@ -1962,6 +2009,8 @@ def native_tools() -> list[dict[str, Any]]:
 
 
 RESOURCES = [
+    {"uri": "ha://mcp/identity", "name": "MCP server identity and target", "mimeType": "application/json"},
+    {"uri": "ha://mcp/catalog", "name": "MCP tool catalog summary", "mimeType": "application/json"},
     {"uri": "ha://core/info", "name": "Home Assistant Core info", "mimeType": "application/json"},
     {"uri": "ha://supervisor/info", "name": "Supervisor info", "mimeType": "application/json"},
     {"uri": "ha://host/info", "name": "Host info", "mimeType": "application/json"},
@@ -2096,6 +2145,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return proxy_call_tool(args, proxy_name=name)
     if name == "mcp_protocol_status":
         return mcp_protocol_status()
+    if name == "mcp_advertisement":
+        return mcp_advertisement()
     if name == "refresh_tool_catalog":
         return refresh_tool_catalog(args)
     if name == "batch_call_tools":
@@ -2792,6 +2843,41 @@ def mcp_protocol_status() -> dict[str, Any]:
         "upstream_homeassistant_ai_implemented_missing": sorted(implemented - tool_names),
         "unimplemented_upstream_homeassistant_ai_tools": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
         "ha_admin_extension_tools": HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES,
+    }
+
+
+def mcp_advertisement() -> dict[str, Any]:
+    headers = {
+        "X-MCP-Server-Name": advertised_server_name(),
+        "X-MCP-Server-Title": advertised_server_title(),
+        "X-MCP-Target-Label": advertised_target_label(),
+        "X-MCP-Target-Host": advertised_target_hint(),
+        "X-MCP-Tool-Count": str(len(native_tools())),
+    }
+    return {
+        "serverInfo": app_server_info(),
+        "instructions": mcp_instructions(),
+        "headers": headers,
+        "identity_resource": "ha://mcp/identity",
+        "catalog_resource": "ha://mcp/catalog",
+        "recommended_client_config": {
+            "transport": "streamable_http_json",
+            "url_path": MCP_PATH,
+            "port": MCP_PORT,
+            "tool_discovery": "tools/list",
+            "tool_call": "tools/call",
+        },
+        "tool_counts": {
+            "native": len(native_tools()),
+            "registered": len(TOOLS),
+            "native_toolset": native_toolset_mode(),
+            "catalog_hash": tool_catalog_fingerprint(),
+        },
+        "codex_notes": [
+            "If Codex does not expose native mcp__... tools, call tools/list on this endpoint or use list_tools/search_tools through tools/call.",
+            "If Codex points to /api/mcp, that is the wrong path for this add-on; use the private 9583 path reported here.",
+            "Use get_target_identity before writes when multiple Home Assistant MCP servers are configured.",
+        ],
     }
 
 
@@ -7592,6 +7678,34 @@ def read_resource(uri: str) -> dict[str, Any]:
         raise ValueError("Unsupported resource URI scheme")
     path = parsed.netloc + parsed.path
     path = path.strip("/")
+    if path == "mcp/identity":
+        return {"contents": [resource_text(uri, get_target_identity())]}
+    if path == "mcp/catalog":
+        return {"contents": [resource_text(uri, {
+            "serverInfo": app_server_info(),
+            "instructions": mcp_instructions(),
+            "tool_counts": {
+                "native": len(native_tools()),
+                "registered": len(TOOLS),
+                "native_toolset": native_toolset_mode(),
+                "catalog_hash": tool_catalog_fingerprint(),
+            },
+            "important_tools": [
+                "get_target_identity",
+                "mcp_protocol_status",
+                "list_tools",
+                "search_tools",
+                "refresh_tool_catalog",
+                "addon_info",
+                "addon_logs",
+                "addon_control",
+                "addon_options",
+                "camera_path_health",
+                "ha_config_set_helper",
+                "live_lovelace_find_cards",
+                "test_automation_trace",
+            ],
+        })]}
     if path == "core/info":
         return {"contents": [resource_text(uri, supervisor_request("GET", "/core/info"))]}
     if path == "supervisor/info":
@@ -7784,6 +7898,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = {
                     "protocolVersion": protocol_version,
                     "serverInfo": app_server_info(self.headers),
+                    "instructions": mcp_instructions(),
                     "capabilities": {
                         "tools": {"listChanged": True},
                         "resources": {"subscribe": False, "listChanged": True},
@@ -7796,6 +7911,17 @@ class Handler(BaseHTTPRequestHandler):
                         "port": MCP_PORT,
                         "dangerous": True,
                         "supportedProtocolVersions": sorted(SUPPORTED_PROTOCOL_VERSIONS),
+                        "targetLabel": advertised_target_label(),
+                        "targetHostHint": advertised_target_hint(),
+                        "catalogHash": tool_catalog_fingerprint(),
+                        "nativeToolCount": len(native_tools()),
+                        "registeredToolCount": len(TOOLS),
+                        "recommendedDiscovery": {
+                            "primary": "tools/list",
+                            "fallbackTools": ["list_tools", "search_tools", "refresh_tool_catalog"],
+                            "identityResource": "ha://mcp/identity",
+                            "catalogResource": "ha://mcp/catalog",
+                        },
                     },
                 }
             elif method == "tools/list":
@@ -7868,8 +7994,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_common_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version")
+        self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version, X-MCP-Server-Name, X-MCP-Server-Title, X-MCP-Target-Label, X-MCP-Target-Host, X-MCP-Tool-Count")
         self.send_header("MCP-Protocol-Version", max(SUPPORTED_PROTOCOL_VERSIONS))
+        self.send_header("X-MCP-Server-Name", advertised_server_name())
+        self.send_header("X-MCP-Server-Title", advertised_server_title())
+        self.send_header("X-MCP-Target-Label", advertised_target_label())
+        if advertised_target_hint():
+            self.send_header("X-MCP-Target-Host", advertised_target_hint())
+        self.send_header("X-MCP-Tool-Count", str(len(native_tools())))
 
     def write_asset(self, path: Path) -> None:
         if not path.exists() or path.parent != APP_ROOT:
