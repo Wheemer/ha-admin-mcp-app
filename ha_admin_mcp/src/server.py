@@ -200,6 +200,38 @@ def redact_secrets(text: Any) -> Any:
     return redacted
 
 
+def run_shell_command(args: dict[str, Any], audit_name: str, shell_executable: str | None = None) -> dict[str, Any]:
+    timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
+    max_output = int(args.get("max_output_bytes") or 20000)
+    audit_payload = {"command": redact_secrets(args["command"]), "cwd": args.get("cwd")}
+    if shell_executable:
+        audit_payload["shell"] = shell_executable
+    audit_event(audit_name, audit_payload)
+    completed = subprocess.run(
+        args["command"],
+        cwd=args.get("cwd") or None,
+        shell=True,
+        executable=shell_executable or None,
+        env=subprocess_env(),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    result = {
+        "cwd": args.get("cwd"),
+        "returncode": completed.returncode,
+        "stdout": redact_secrets(completed.stdout[:max_output]),
+        "stderr": redact_secrets(completed.stderr[:max_output]),
+        "stdout_truncated": len(completed.stdout) > max_output,
+        "stderr_truncated": len(completed.stderr) > max_output,
+    }
+    if shell_executable:
+        result["shell"] = shell_executable
+    if bool(args.get("echo_command")):
+        result["command"] = redact_secrets(args["command"])
+    return result
+
+
 def text_result(value: Any) -> dict[str, Any]:
     text = value if isinstance(value, str) else json.dumps(value, indent=2, default=str)
     return {"content": [{"type": "text", "text": text}]}
@@ -2069,76 +2101,8 @@ PROMPTS = [
 def call_tool(name: str, args: dict[str, Any]) -> Any:
     if name in IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET or name in HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET:
         return call_upstream_compat_tool(name, args)
-    if name == "run_command":
-        timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
-        max_output = int(args.get("max_output_bytes") or 20000)
-        audit_event("run_command", {"command": redact_secrets(args["command"]), "cwd": args.get("cwd")})
-        completed = subprocess.run(
-            args["command"],
-            cwd=args.get("cwd") or None,
-            shell=True,
-            env=subprocess_env(),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
-        result = {
-            "cwd": args.get("cwd"),
-            "returncode": completed.returncode,
-            "stdout": redact_secrets(completed.stdout[:max_output]),
-            "stderr": redact_secrets(completed.stderr[:max_output]),
-            "stdout_truncated": len(completed.stdout) > max_output,
-            "stderr_truncated": len(completed.stderr) > max_output,
-        }
-        if bool(args.get("echo_command")):
-            result["command"] = redact_secrets(args["command"])
-        return result
-    if name == "run_shell":
-        timeout = int(args.get("timeout") or OPTIONS.get("command_timeout_seconds") or 300)
-        max_output = int(args.get("max_output_bytes") or 20000)
-        audit_event("run_shell", {"command": redact_secrets(args["command"]), "shell": args.get("shell"), "cwd": args.get("cwd")})
-        completed = subprocess.run(
-            args["command"],
-            cwd=args.get("cwd") or None,
-            shell=True,
-            executable=args.get("shell") or None,
-            env=subprocess_env(),
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
-        result = {
-            "shell": args.get("shell"),
-            "cwd": args.get("cwd"),
-            "returncode": completed.returncode,
-            "stdout": redact_secrets(completed.stdout[:max_output]),
-            "stderr": redact_secrets(completed.stderr[:max_output]),
-            "stdout_truncated": len(completed.stdout) > max_output,
-            "stderr_truncated": len(completed.stderr) > max_output,
-        }
-        if bool(args.get("echo_command")):
-            result["command"] = redact_secrets(args["command"])
-        return result
-    if name == "get_environment":
-        return get_environment(bool(args.get("include_values")))
-    if name == "get_target_identity":
-        return get_target_identity()
-    if name == "get_version":
-        return get_version()
-    if name == "search_tools":
-        return search_tools(args, int(args.get("limit") or 50), bool(args.get("include_schema")))
-    if name == "list_tools":
-        return list_tools(args)
-    if name in ("call_tool", "mcp_call_tool"):
-        return proxy_call_tool(args, proxy_name=name)
-    if name == "mcp_protocol_status":
-        return mcp_protocol_status()
-    if name == "mcp_advertisement":
-        return mcp_advertisement()
-    if name == "refresh_tool_catalog":
-        return refresh_tool_catalog(args)
-    if name == "batch_call_tools":
-        return batch_call_tools(args)
+    if handler := DIRECT_TOOL_HANDLERS.get(name):
+        return handler(args)
     if name == "stat_path":
         path = visible_path(args.get("path"))
         return path_info(path) if path.exists() or path.is_symlink() else {"path": str(path), "exists": False}
@@ -2159,42 +2123,11 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         data, truncated = read_bytes_limited(path, int(args.get("max_bytes") or MAX_READ_BYTES))
         return {"path": str(path), "content_base64": base64.b64encode(data).decode(), "truncated": truncated}
     if name == "write_file":
-        path = visible_path(args.get("path"), require=True)
-        require_expected_hash(path, args.get("expected_hash"))
-        if bool(args.get("dry_run")):
-            return {"path": str(path), "dry_run": True, "would_write_bytes": len(args["content"].encode()), "current_hash": path_hash(path)}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(args["content"])
-        if args.get("mode"):
-            path.chmod(int(str(args["mode"]), 8))
-        audit_event("write_file", {"path": str(path), "bytes": len(args["content"].encode())})
-        return path_info(path)
+        return write_visible_file(args, binary=False)
     if name == "write_file_base64":
-        path = visible_path(args.get("path"), require=True)
-        require_expected_hash(path, args.get("expected_hash"))
-        data = base64.b64decode(args["content_base64"])
-        if bool(args.get("dry_run")):
-            return {"path": str(path), "dry_run": True, "would_write_bytes": len(data), "current_hash": path_hash(path)}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        if args.get("mode"):
-            path.chmod(int(str(args["mode"]), 8))
-        audit_event("write_file_base64", {"path": str(path), "bytes": len(data)})
-        return path_info(path)
+        return write_visible_file(args, binary=True)
     if name == "delete_path":
-        path = visible_path(args.get("path"), require=True)
-        require_force_for_path(path, args, "delete_path")
-        if bool(args.get("dry_run")):
-            return {"path": str(path), "dry_run": True, "exists": path.exists(), "recursive": bool(args.get("recursive"))}
-        if path.is_dir() and not path.is_symlink():
-            if not args.get("recursive"):
-                path.rmdir()
-            else:
-                shutil.rmtree(path)
-        else:
-            path.unlink()
-        audit_event("delete_path", {"path": str(path), "recursive": bool(args.get("recursive"))})
-        return {"path": str(path), "deleted": True}
+        return delete_visible_path(args)
     if name == "search_files":
         return search_files(args)
     if name == "glob_paths":
@@ -5193,6 +5126,39 @@ def hash_file(path: Path, algorithm: str) -> dict[str, Any]:
     return {"path": str(path), "algorithm": algorithm, "hexdigest": digest.hexdigest(), "size": path.stat().st_size}
 
 
+def write_visible_file(args: dict[str, Any], binary: bool = False) -> dict[str, Any]:
+    path = visible_path(args.get("path"), require=True)
+    require_expected_hash(path, args.get("expected_hash"))
+    data = base64.b64decode(args["content_base64"]) if binary else args["content"].encode()
+    if bool(args.get("dry_run")):
+        return {"path": str(path), "dry_run": True, "would_write_bytes": len(data), "current_hash": path_hash(path)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if binary:
+        path.write_bytes(data)
+    else:
+        path.write_text(args["content"])
+    if args.get("mode"):
+        path.chmod(int(str(args["mode"]), 8))
+    audit_event("write_file_base64" if binary else "write_file", {"path": str(path), "bytes": len(data)})
+    return path_info(path)
+
+
+def delete_visible_path(args: dict[str, Any]) -> dict[str, Any]:
+    path = visible_path(args.get("path"), require=True)
+    require_force_for_path(path, args, "delete_path")
+    if bool(args.get("dry_run")):
+        return {"path": str(path), "dry_run": True, "exists": path.exists(), "recursive": bool(args.get("recursive"))}
+    if path.is_dir() and not path.is_symlink():
+        if not args.get("recursive"):
+            path.rmdir()
+        else:
+            shutil.rmtree(path)
+    else:
+        path.unlink()
+    audit_event("delete_path", {"path": str(path), "recursive": bool(args.get("recursive"))})
+    return {"path": str(path), "deleted": True}
+
+
 def inspect_media_file(args: dict[str, Any]) -> dict[str, Any]:
     path = visible_path(args.get("path"))
     max_bytes = int(args.get("max_bytes") or 64)
@@ -7785,6 +7751,23 @@ def completion_result() -> dict[str, Any]:
 
 def is_mcp_path(path: str) -> bool:
     return urllib.parse.urlsplit(path).path == MCP_PATH
+
+
+DIRECT_TOOL_HANDLERS = {
+    "run_command": lambda args: run_shell_command(args, audit_name="run_command"),
+    "run_shell": lambda args: run_shell_command(args, audit_name="run_shell", shell_executable=args.get("shell")),
+    "get_environment": lambda args: get_environment(bool(args.get("include_values"))),
+    "get_target_identity": lambda args: get_target_identity(),
+    "get_version": lambda args: get_version(),
+    "search_tools": lambda args: search_tools(args, int(args.get("limit") or 50), bool(args.get("include_schema"))),
+    "list_tools": lambda args: list_tools(args),
+    "call_tool": lambda args: proxy_call_tool(args, proxy_name="call_tool"),
+    "mcp_call_tool": lambda args: proxy_call_tool(args, proxy_name="mcp_call_tool"),
+    "mcp_protocol_status": lambda args: mcp_protocol_status(),
+    "mcp_advertisement": lambda args: mcp_advertisement(),
+    "refresh_tool_catalog": lambda args: refresh_tool_catalog(args),
+    "batch_call_tools": lambda args: batch_call_tools(args),
+}
 
 
 class Handler(BaseHTTPRequestHandler):
