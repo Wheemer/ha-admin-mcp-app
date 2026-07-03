@@ -4683,6 +4683,8 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         return ha_request("DELETE", f"/config/{domain}/config/{item_id}")
     if name == "ha_manage_backup":
         return manage_backup_tool(args)
+    if name == "ha_manage_radio":
+        return manage_radio_tool(args)
     if name == "ha_get_updates":
         return {"core": supervisor_request("GET", "/core/info"), "store": supervisor_request("GET", "/store")}
     if name == "ha_get_hacs_info":
@@ -4878,6 +4880,146 @@ def manage_backup_tool(args: dict[str, Any]) -> dict[str, Any]:
     if action == "restore" and "restore_database" in args:
         body = {**body, "database": bool(args.get("restore_database"))}
     return supervisor_request("POST", f"/backups/{slug}/{action}", body)
+
+
+RADIO_INTEGRATION_DOMAINS = {
+    "zwave": ["zwave_js"],
+    "zigbee": ["zha", "zigbee2mqtt"],
+    "matter": ["matter"],
+    "thread": ["thread", "otbr"],
+}
+
+RADIO_ACTIONS = {
+    "zwave": {
+        "diagnostics": "List Z-Wave JS config entries and related device status.",
+        "network_status": "List Z-Wave JS config entries and related device status.",
+        "ping": "Update/read a target entity or device for an active reachability probe.",
+        "add": "Start Z-Wave inclusion through zwave_js.add_node when available.",
+        "remove_device": "Start Z-Wave exclusion through zwave_js.remove_node when available.",
+        "heal": "Start network/node healing through zwave_js service calls.",
+        "reinterview": "Refresh node info through zwave_js.refresh_info when available.",
+        "firmware_update": "Call an explicit service/websocket payload supplied in params.",
+    },
+    "zigbee": {
+        "diagnostics": "List ZHA/Zigbee2MQTT config entries and related device status.",
+        "network_status": "List ZHA/Zigbee2MQTT config entries and related device status.",
+        "ping": "Update/read a target entity or device for an active reachability probe.",
+        "add": "Permit ZHA joining through zha.permit when available.",
+        "permit_join": "Permit ZHA joining through zha.permit when available.",
+        "remove_device": "Remove a ZHA device through zha.remove when available.",
+        "reconfigure": "Call an explicit service/websocket payload supplied in params.",
+        "change_channel": "Call an explicit service/websocket payload supplied in params; requires confirm.",
+    },
+    "matter": {
+        "diagnostics": "List Matter config entries and related device status.",
+        "network_status": "List Matter config entries and related device status.",
+        "ping": "Update/read a target entity or device for an active reachability probe.",
+        "commission": "Call an explicit service/websocket payload supplied in params.",
+        "remove_device": "Call an explicit service/websocket payload supplied in params; requires confirm.",
+        "remove_fabric": "Call an explicit service/websocket payload supplied in params; requires confirm.",
+    },
+    "thread": {
+        "diagnostics": "List Thread/OTBR config entries and related device status.",
+        "network_status": "List Thread/OTBR config entries and related device status.",
+        "ping": "Update/read a target entity or device for an active reachability probe.",
+        "commission": "Call an explicit service/websocket payload supplied in params.",
+        "provision_credentials": "Call an explicit service/websocket payload supplied in params.",
+        "hard_reset": "Call an explicit service/websocket payload supplied in params; requires confirm.",
+    },
+}
+
+RADIO_DESTRUCTIVE_ACTIONS = {"remove_device", "remove_fabric", "change_channel", "hard_reset", "restore_network", "factory_reset"}
+
+
+def radio_supported_actions(radio: str) -> dict[str, str]:
+    return RADIO_ACTIONS.get(radio, {})
+
+
+def radio_status(radio: str, args: dict[str, Any]) -> dict[str, Any]:
+    entries = []
+    for domain in RADIO_INTEGRATION_DOMAINS[radio]:
+        try:
+            entries.append({"domain": domain, "result": search_config_entries({"domain": domain, "limit": 100})})
+        except Exception as err:
+            entries.append({"domain": domain, "error": str(err)})
+    target = {}
+    if args.get("entity_id"):
+        target["entity"] = get_entity({"entity_id": args["entity_id"], "detailed": True})
+    if args.get("device_id"):
+        target["device"] = get_registry_entry("device_registry", str(args["device_id"]))
+    return {
+        "success": True,
+        "radio": radio,
+        "domains": RADIO_INTEGRATION_DOMAINS[radio],
+        "config_entries": entries,
+        "target": target,
+        "supported_actions": radio_supported_actions(radio),
+    }
+
+
+def radio_ping(args: dict[str, Any]) -> dict[str, Any]:
+    entity_id = args.get("entity_id")
+    device_id = args.get("device_id")
+    if entity_id:
+        before = get_entity({"entity_id": entity_id, "detailed": True})
+        try:
+            update = ha_request("POST", "/services/homeassistant/update_entity", {"entity_id": entity_id})
+        except Exception as err:
+            update = {"error": str(err)}
+        after = get_entity({"entity_id": entity_id, "detailed": True})
+        return {"success": True, "entity_id": entity_id, "before": before, "update_entity": update, "after": after}
+    if device_id:
+        return {"success": True, "device_id": device_id, "device": get_registry_entry("device_registry", str(device_id))}
+    raise ValueError("ping requires entity_id or device_id")
+
+
+def radio_service_call(radio: str, action: str, params: dict[str, Any]) -> dict[str, Any]:
+    domain = params.get("service_domain") or params.get("domain")
+    service = params.get("service")
+    data = params.get("data") or {key: value for key, value in params.items() if key not in {"domain", "service_domain", "service", "message"}}
+    if domain and service:
+        result = ha_request("POST", f"/services/{domain}/{service}", data)
+        return {"success": True, "radio": radio, "action": action, "service": f"{domain}.{service}", "result": result, "long_running": True}
+    message = params.get("message")
+    if isinstance(message, dict) and message.get("type"):
+        result = ws_result(message)
+        return {"success": True, "radio": radio, "action": action, "websocket_type": message.get("type"), "result": result}
+    raise ValueError("This radio action needs params.service_domain/service/data or params.message for the exact HA integration command")
+
+
+def manage_radio_tool(args: dict[str, Any]) -> dict[str, Any]:
+    radio = str(args.get("radio") or "").lower()
+    action = str(args.get("action") or "").lower()
+    if radio not in RADIO_INTEGRATION_DOMAINS:
+        raise ValueError("radio must be one of zwave, zigbee, matter, thread")
+    if not action:
+        raise ValueError("action is required")
+    supported = radio_supported_actions(radio)
+    if action not in supported:
+        return {"success": False, "radio": radio, "action": action, "supported_actions": supported}
+    if action in RADIO_DESTRUCTIVE_ACTIONS and not bool(args.get("confirm")):
+        raise ValueError(f"{action} requires confirm=true")
+    if action in {"diagnostics", "network_status"}:
+        return radio_status(radio, args)
+    if action == "ping":
+        return radio_ping(args)
+    params = dict(args.get("params") or {})
+    if radio == "zwave":
+        if action == "add":
+            params = {"service_domain": "zwave_js", "service": "add_node"} | params
+        elif action == "remove_device":
+            params = {"service_domain": "zwave_js", "service": "remove_node"} | params
+        elif action == "heal":
+            params = {"service_domain": "zwave_js", "service": "heal_network"} | params
+        elif action == "reinterview":
+            params = {"service_domain": "zwave_js", "service": "refresh_info"} | params
+    elif radio == "zigbee":
+        if action in {"add", "permit_join"}:
+            params = {"service_domain": "zha", "service": "permit"} | params
+        elif action == "remove_device":
+            params = {"service_domain": "zha", "service": "remove"} | params
+    audit_event("ha_manage_radio", {"radio": radio, "action": action, "device_id": args.get("device_id"), "entity_id": args.get("entity_id")})
+    return radio_service_call(radio, action, params)
 
 
 def _hacs_category(category: Any) -> str | None:

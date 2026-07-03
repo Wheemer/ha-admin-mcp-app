@@ -3994,5 +3994,65 @@
       "required": []
     },
     "source_file": "tools_zones.py"
+  },
+  {
+    "name": "ha_manage_radio",
+    "title": "Manage Radios (Z-Wave / Zigbee / Matter / Thread)",
+    "description": "Manage Home Assistant radios \u2014 Z-Wave, Zigbee, Matter, and Thread.\n\nFor read-only inspection prefer ha_get_device / ha_get_system_health,\nwhich mirror the 'diagnostics' and 'network_status' actions; use this\ntool for writes and the active 'ping' probe (unique to this tool). Write\nactions perform inclusion/commissioning, removal, healing,\nreconfiguration, firmware updates and credential provisioning.\n\nCaveats: destructive actions (e.g. remove_device, network restore,\nchange_channel, hard_reset, remove_fabric) require confirm=True.\nLong-running actions (inclusion, rebuild routes, firmware) start the\noperation and return immediately with long_running=true; completion\nhappens out-of-band. Interactive Z-Wave S2 secure inclusion (read-the-\nPIN pairing) is not scriptable \u2014 use SmartStart/QR provisioning here or\nthe HA UI.",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "tags": [
+      "Matter",
+      "Radio Management",
+      "Thread",
+      "Z-Wave",
+      "Zigbee"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "radio": {
+          "description": "Which radio to manage.",
+          "enum": [
+            "zwave",
+            "zigbee",
+            "matter",
+            "thread"
+          ],
+          "type": "string"
+        },
+        "action": {
+          "description": "Operation to perform. Actions vary per radio; an unknown action returns the supported list for that radio. Common: diagnostics, network_status, ping, add/commission, remove_device, reinterview/reconfigure, firmware_update.",
+          "type": "string"
+        },
+        "device_id": {
+          "description": "Target device/node for node-scoped actions.",
+          "type": "string",
+          "default": null
+        },
+        "entity_id": {
+          "description": "Resolve the device from this entity for node-scoped actions.",
+          "type": "string",
+          "default": null
+        },
+        "params": {
+          "description": "Action-specific parameters. For advanced operations, pass service_domain/service or a websocket message.",
+          "type": "object",
+          "default": null
+        },
+        "confirm": {
+          "description": "Required true to run destructive actions.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "radio",
+        "action"
+      ]
+    },
+    "source_file": "tools_radio.py"
   }
 ]
