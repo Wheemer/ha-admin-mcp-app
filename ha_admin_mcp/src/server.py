@@ -109,7 +109,7 @@ def load_options() -> dict[str, Any]:
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
-        "native_toolset": os.environ.get("NATIVE_TOOLSET", "full"),
+        "native_toolset": os.environ.get("NATIVE_TOOLSET", "bootstrap"),
         "frigate_url": os.environ.get("FRIGATE_URL", ""),
         "go2rtc_url": os.environ.get("GO2RTC_URL", ""),
         "target_label": os.environ.get("TARGET_LABEL", ""),
@@ -770,6 +770,29 @@ TOOLS = [
         {"name": {"type": "string"}, "arguments": {"type": "object"}},
         ["name"],
     ),
+    tool_schema("ha_mcp_status", "Compact front-door tool: return MCP protocol, target, and catalog status", {}, []),
+    tool_schema(
+        "ha_mcp_list_tools",
+        "Compact front-door tool: search or list the full registered HA Admin MCP catalog without native-ingesting every tool",
+        {
+            "query": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+            "q": {"type": "string"},
+            "text": {"type": "string"},
+            "filter": {"type": "object"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+            "include_schema": {"type": "boolean"},
+            "native_only": {"type": "boolean"},
+            "exposed_only": {"type": "boolean"},
+        },
+        [],
+    ),
+    tool_schema(
+        "ha_mcp_call_tool",
+        "Compact front-door tool: call any registered HA Admin MCP tool by name with an arguments object",
+        {"name": {"type": "string"}, "arguments": {"type": "object"}},
+        ["name"],
+    ),
+    tool_schema("ha_mcp_get_identity", "Compact front-door tool: return the Home Assistant target identity", {}, []),
     tool_schema(
         "mcp_protocol_status",
         "Return MCP protocol support, endpoint metadata, and implemented upstream Home Assistant MCP tool parity",
@@ -1989,6 +2012,10 @@ HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET = frozenset(HA_ADMIN_COMPAT_EXTENSION_TO
 
 
 BOOTSTRAP_NATIVE_TOOL_NAMES = {
+    "ha_mcp_status",
+    "ha_mcp_list_tools",
+    "ha_mcp_call_tool",
+    "ha_mcp_get_identity",
     "get_target_identity",
     "get_version",
     "search_tools",
@@ -1996,13 +2023,14 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
     "call_tool",
     "mcp_call_tool",
     "mcp_protocol_status",
+    "mcp_advertisement",
     "refresh_tool_catalog",
     "batch_call_tools",
 }
 
 
 def native_toolset_mode() -> str:
-    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "full").lower()
+    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "bootstrap").lower()
     return mode if mode in {"bootstrap", "standard", "upstream", "full"} else "standard"
 
 
@@ -2670,7 +2698,7 @@ def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
     if not target:
         raise ValueError("name is required")
     target_name = str(target)
-    if target_name in {proxy_name, "call_tool", "mcp_call_tool", "batch_call_tools", "ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"}:
+    if target_name in {proxy_name, "call_tool", "mcp_call_tool", "ha_mcp_call_tool", "batch_call_tools", "ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"}:
         raise ValueError("Refusing recursive proxy tool call")
     known = {tool["name"] for tool in TOOLS}
     if target_name not in known:
@@ -7763,6 +7791,10 @@ DIRECT_TOOL_HANDLERS = {
     "list_tools": lambda args: list_tools(args),
     "call_tool": lambda args: proxy_call_tool(args, proxy_name="call_tool"),
     "mcp_call_tool": lambda args: proxy_call_tool(args, proxy_name="mcp_call_tool"),
+    "ha_mcp_status": lambda args: mcp_protocol_status(),
+    "ha_mcp_list_tools": lambda args: list_tools(args),
+    "ha_mcp_call_tool": lambda args: proxy_call_tool(args, proxy_name="ha_mcp_call_tool"),
+    "ha_mcp_get_identity": lambda args: get_target_identity(),
     "mcp_protocol_status": lambda args: mcp_protocol_status(),
     "mcp_advertisement": lambda args: mcp_advertisement(),
     "refresh_tool_catalog": lambda args: refresh_tool_catalog(args),

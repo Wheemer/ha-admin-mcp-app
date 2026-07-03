@@ -72,7 +72,7 @@ There is no extra safety checkbox. Installing and starting this app is the expli
 
 ## Tool Refresh Workflow
 
-Some MCP clients cache the native tool list when they connect. After updating this app, new first-class tool names may not appear in that client's native tool picker until the client reconnects. The standard path is MCP `tools/list` and `tools/call`. The helper tools `list_tools`, `search_tools`, `refresh_tool_catalog`, `call_tool`, `mcp_call_tool`, and `batch_call_tools` are real tools backed by the same live catalog.
+Some MCP clients cache or transform the native tool list when they connect. This app defaults to a compact native `tools/list` front door so clients do not have to ingest the full administrative catalog at startup. The standard path is MCP `tools/list` and `tools/call`: use `list_tools` or `search_tools` to discover the full registered catalog, then use `call_tool`, `mcp_call_tool`, or `ha_mcp_call_tool` to execute any registered tool. The full catalog remains real and callable; it is just not all advertised as native tools by default.
 
 ## MCP Protocol Surface
 
