@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 ADDON_OPTIONS = Path("/data/options.json")
 CONFIG_ROOT = Path("/config")
@@ -110,6 +111,7 @@ def load_options() -> dict[str, Any]:
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
         "native_toolset": os.environ.get("NATIVE_TOOLSET", "full"),
+        "mcp_runtime": os.environ.get("MCP_RUNTIME", "fastmcp"),
         "frigate_url": os.environ.get("FRIGATE_URL", ""),
         "go2rtc_url": os.environ.get("GO2RTC_URL", ""),
         "target_label": os.environ.get("TARGET_LABEL", ""),
@@ -7987,6 +7989,145 @@ DIRECT_TOOL_HANDLERS = {
 }
 
 
+class AdminDispatchToolAdapter:
+    """Tiny adapter around the existing schema/handler catalog for FastMCP."""
+
+    def __init__(self, schema: dict[str, Any]):
+        from fastmcp.tools.base import Tool
+        from mcp.types import ToolAnnotations
+
+        annotations = schema.get("annotations")
+        self.name = str(schema["name"])
+
+        class _AdminDispatchTool(Tool):
+            async def run(inner_self, arguments: dict[str, Any]):
+                from fastmcp.tools.base import ToolResult
+
+                try:
+                    value = call_tool(inner_self.name, arguments or {})
+                    return inner_self.convert_result(value)
+                except Exception as err:
+                    return ToolResult(
+                        content=redact_secrets(str(err)),
+                        meta={"tool": inner_self.name},
+                        is_error=True,
+                    )
+
+        self.tool = _AdminDispatchTool(
+            name=self.name,
+            description=schema.get("description"),
+            parameters=schema.get("inputSchema") or {"type": "object", "properties": {}},
+            annotations=ToolAnnotations.model_validate(annotations) if annotations else None,
+            meta=sanitize_metadata(schema.get("_meta")) if schema.get("_meta") else None,
+        )
+
+
+class BearerTokenASGIMiddleware:
+    """Protect the MCP route with the same optional admin_token as legacy HTTP."""
+
+    def __init__(self, app: Callable[..., Any]):
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        token = str(OPTIONS.get("admin_token") or "")
+        if scope.get("type") != "http" or not token:
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path") or "")
+        if path != MCP_PATH:
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        if headers.get("authorization") == f"Bearer {token}":
+            await self.app(scope, receive, send)
+            return
+        body = b'{"error":"unauthorized"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def build_fastmcp_server():
+    from fastmcp import FastMCP
+    from mcp.types import Icon
+    from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
+
+    mcp = FastMCP(
+        name=advertised_server_name(),
+        version=APP_VERSION,
+        instructions=mcp_instructions(),
+        icons=[
+            Icon(src=f"http://{advertised_target_hint() or '127.0.0.1'}:{MCP_PORT}/icon.png", mimeType="image/png", sizes=["512x512"]),
+            Icon(src=f"http://{advertised_target_hint() or '127.0.0.1'}:{MCP_PORT}/logo.png", mimeType="image/png", sizes=["512x512"]),
+            Icon(src=f"http://{advertised_target_hint() or '127.0.0.1'}:{MCP_PORT}/icon.svg", mimeType="image/svg+xml"),
+        ],
+    )
+
+    for schema in native_tools():
+        mcp.add_tool(AdminDispatchToolAdapter(schema).tool)
+
+    @mcp.custom_route("/health", methods=["GET"])
+    async def _health(_request):
+        return JSONResponse({"ok": True, "dangerous": True, "runtime": "fastmcp"})
+
+    @mcp.custom_route("/icon.png", methods=["GET"])
+    async def _icon_png(_request):
+        return FileResponse(APP_ROOT / "icon.png", media_type="image/png")
+
+    @mcp.custom_route("/logo.png", methods=["GET"])
+    async def _logo_png(_request):
+        return FileResponse(APP_ROOT / "logo.png", media_type="image/png")
+
+    @mcp.custom_route("/icon.svg", methods=["GET"])
+    async def _icon_svg(_request):
+        return FileResponse(APP_ROOT / "icon.svg", media_type="image/svg+xml")
+
+    @mcp.custom_route("/logo.svg", methods=["GET"])
+    async def _logo_svg(_request):
+        return FileResponse(APP_ROOT / "logo.svg", media_type="image/svg+xml")
+
+    @mcp.custom_route(MCP_PATH, methods=["GET"])
+    async def _mcp_get(_request):
+        return PlainTextResponse(
+            "HA Admin MCP is running. Use MCP Streamable HTTP POST on this URL.",
+            status_code=405,
+            headers={"Allow": "POST, DELETE"},
+        )
+
+    return mcp
+
+
+def run_fastmcp_server(host: str) -> None:
+    from starlette.middleware import Middleware
+
+    mcp = build_fastmcp_server()
+    print(
+        "[ha-admin-mcp] EXTREMELY DANGEROUS FastMCP server listening on "
+        f"{host}:{MCP_PORT}{redacted_mcp_path()}; native tools={len(native_tools())} registered tools={len(TOOLS)}",
+        flush=True,
+    )
+    mcp.run(
+        transport="http",
+        host=host,
+        port=MCP_PORT,
+        path=MCP_PATH,
+        stateless_http=True,
+        middleware=[Middleware(BearerTokenASGIMiddleware)],
+        show_banner=False,
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HAAdminMCP/0.1"
 
@@ -8210,8 +8351,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     host = str(OPTIONS.get("bind_host") or "0.0.0.0")
+    if str(OPTIONS.get("mcp_runtime") or "").lower() != "legacy":
+        run_fastmcp_server(host)
+        return
     print(
-        "[ha-admin-mcp] EXTREMELY DANGEROUS server listening on "
+        "[ha-admin-mcp] EXTREMELY DANGEROUS legacy MCP server listening on "
         f"{host}:{MCP_PORT}{redacted_mcp_path()}; installing and starting this app grants admin MCP access",
         flush=True,
     )
