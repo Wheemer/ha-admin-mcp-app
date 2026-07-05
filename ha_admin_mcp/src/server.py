@@ -109,7 +109,7 @@ def load_options() -> dict[str, Any]:
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
-        "native_toolset": os.environ.get("NATIVE_TOOLSET", "bootstrap"),
+        "native_toolset": os.environ.get("NATIVE_TOOLSET", "standard"),
         "frigate_url": os.environ.get("FRIGATE_URL", ""),
         "go2rtc_url": os.environ.get("GO2RTC_URL", ""),
         "target_label": os.environ.get("TARGET_LABEL", ""),
@@ -333,8 +333,8 @@ def app_server_info(headers: Any | None = None) -> dict[str, Any]:
         "version": APP_VERSION,
         "description": f"Privileged Home Assistant administration MCP add-on for {advertised_target_label()}",
         "icons": [
-            {"src": f"{base}/icon.png", "mimeType": "image/png", "sizes": "512x512"},
-            {"src": f"{base}/logo.png", "mimeType": "image/png", "sizes": "512x512"},
+            {"src": f"{base}/icon.png", "mimeType": "image/png", "sizes": ["512x512"]},
+            {"src": f"{base}/logo.png", "mimeType": "image/png", "sizes": ["512x512"]},
             {"src": f"{base}/icon.svg", "mimeType": "image/svg+xml"},
         ],
         "websiteUrl": "https://github.com/Wheemer/ha-admin-mcp-app",
@@ -2072,7 +2072,7 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
 
 
 def native_toolset_mode() -> str:
-    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "bootstrap").lower()
+    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "standard").lower()
     return mode if mode in {"bootstrap", "standard", "upstream", "full"} else "standard"
 
 
