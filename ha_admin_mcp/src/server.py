@@ -182,22 +182,63 @@ def subprocess_env(include_supervisor_token: bool = True) -> dict[str, str]:
     return env
 
 
+SENSITIVE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token)", re.IGNORECASE)
+PRIVATE_MCP_PATH_RE = re.compile(r"/private_[A-Za-z0-9_-]{8,}")
+
+
+def redacted_mcp_path() -> str:
+    if PRIVATE_MCP_PATH_RE.fullmatch(MCP_PATH):
+        return "/private_[REDACTED]"
+    return MCP_PATH
+
+
 def redact_secrets(text: Any) -> Any:
     if not isinstance(text, str):
         return text
     redacted = text
+    redacted = PRIVATE_MCP_PATH_RE.sub("/private_[REDACTED]", redacted)
+    redacted = redacted.replace(MCP_PATH, redacted_mcp_path())
     for token in (os.environ.get("SUPERVISOR_TOKEN"), os.environ.get("HASSIO_TOKEN")):
         if token:
             redacted = redacted.replace(token, "[REDACTED_TOKEN]")
+    admin_token = OPTIONS.get("admin_token")
+    if admin_token:
+        redacted = redacted.replace(str(admin_token), "[REDACTED]")
+    configured_path = OPTIONS.get("secret_path")
+    if configured_path and str(configured_path) != MCP_PATH and not PRIVATE_MCP_PATH_RE.fullmatch(str(configured_path)):
+        redacted = redacted.replace(str(configured_path), "[REDACTED]")
     try:
         token = get_supervisor_token()
         if token:
             redacted = redacted.replace(token, "[REDACTED_TOKEN]")
     except Exception:
         pass
+    redacted = re.sub(r"(Authorization:\s*Bearer\s+)[^\s]+", r"\1[REDACTED_TOKEN]", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r'("(?:access_token|refresh_token|token|password|secret|api_key|apikey)"\s*:\s*")[^"]+', r"\1[REDACTED]", redacted, flags=re.IGNORECASE)
     redacted = re.sub(r"([?&](?:token|auth|apikey|api_key|password|pass|access_token)=)[^&\s]+", r"\1[REDACTED]", redacted, flags=re.IGNORECASE)
     redacted = re.sub(r"(rtsp://[^:\s/@]+:)[^@\s/]+@", r"\1[REDACTED]@", redacted, flags=re.IGNORECASE)
     return redacted
+
+
+def sanitize_metadata(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, list):
+        return [sanitize_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_metadata(item) for item in value]
+    if isinstance(value, dict):
+        row: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if SENSITIVE_KEY_RE.search(key_text):
+                row[key] = f"<redacted:{len(str(item))}>"
+            elif key_text in {"endpointPath", "endpoint_path", "url_path"} and item == MCP_PATH:
+                row[key] = redacted_mcp_path()
+            else:
+                row[key] = sanitize_metadata(item)
+        return row
+    return value
 
 
 def run_shell_command(args: dict[str, Any], audit_name: str, shell_executable: str | None = None) -> dict[str, Any]:
@@ -300,7 +341,8 @@ def app_server_info(headers: Any | None = None) -> dict[str, Any]:
         "_meta": {
             "targetLabel": advertised_target_label(),
             "targetHostHint": advertised_target_hint(),
-            "endpointPath": MCP_PATH,
+            "endpointPath": redacted_mcp_path(),
+            "endpointPathRedacted": True,
             "toolCatalogHash": tool_catalog_fingerprint() if "TOOLS" in globals() else "",
             "nativeToolCount": len(native_tools()) if "TOOLS" in globals() else 0,
             "registeredToolCount": len(TOOLS) if "TOOLS" in globals() else 0,
@@ -309,9 +351,9 @@ def app_server_info(headers: Any | None = None) -> dict[str, Any]:
 
 
 def tool_error_result(message: str, details: Any | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"error": message}
+    payload: dict[str, Any] = {"error": redact_secrets(message)}
     if details is not None:
-        payload["details"] = details
+        payload["details"] = sanitize_metadata(details)
     result = text_result(payload)
     result["isError"] = True
     return result
@@ -547,10 +589,10 @@ def http_request(args: dict[str, Any]) -> dict[str, Any]:
                 data = data[:max_bytes]
             text = data.decode("utf-8", errors="replace")
             return {
-                "url": args["url"],
+                "url": redact_secrets(args["url"]),
                 "status": response.status,
-                "headers": dict(response.headers.items()),
-                "content": text,
+                "headers": sanitize_metadata(dict(response.headers.items())),
+                "content": redact_secrets(text),
                 "truncated": truncated,
             }
     except urllib.error.HTTPError as err:
@@ -559,10 +601,10 @@ def http_request(args: dict[str, Any]) -> dict[str, Any]:
         if truncated:
             data = data[:max_bytes]
         return {
-            "url": args["url"],
+            "url": redact_secrets(args["url"]),
             "status": err.code,
-            "headers": dict(err.headers.items()),
-            "content": data.decode("utf-8", errors="replace"),
+            "headers": sanitize_metadata(dict(err.headers.items())),
+            "content": redact_secrets(data.decode("utf-8", errors="replace")),
             "truncated": truncated,
         }
 
@@ -579,7 +621,7 @@ def tool_annotations(name: str) -> dict[str, Any]:
 def audit_event(action: str, details: dict[str, Any]) -> None:
     try:
         DEFAULT_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        row = {"time": datetime.now(timezone.utc).isoformat(), "action": action, "details": details}
+        row = {"time": datetime.now(timezone.utc).isoformat(), "action": action, "details": sanitize_metadata(details)}
         with AUDIT_LOG.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, default=str) + "\n")
     except Exception as err:
@@ -2547,7 +2589,7 @@ def get_target_identity() -> dict[str, Any]:
     supervisor = supervisor_request("GET", "/supervisor/info")
     host = supervisor_request("GET", "/host/info")
     return {
-        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": redacted_mcp_path(), "endpoint_path_redacted": True, "port": MCP_PORT},
         "target_label": OPTIONS.get("target_label") or "",
         "target_host_hint": OPTIONS.get("target_host_hint") or "",
         "core": core.get("data", core) if isinstance(core, dict) else core,
@@ -2737,7 +2779,7 @@ def mcp_protocol_status() -> dict[str, Any]:
     exposed_tool_names = {tool["name"] for tool in native_tools()}
     implemented = set(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET)
     return {
-        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": MCP_PATH, "port": MCP_PORT},
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": redacted_mcp_path(), "endpoint_path_redacted": True, "port": MCP_PORT},
         "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
         "transport": {
             "kind": "streamable_http_json",
@@ -2804,7 +2846,8 @@ def mcp_advertisement() -> dict[str, Any]:
         "catalog_resource": "ha://mcp/catalog",
         "recommended_client_config": {
             "transport": "streamable_http_json",
-            "url_path": MCP_PATH,
+            "url_path": redacted_mcp_path(),
+            "url_path_redacted": True,
             "port": MCP_PORT,
             "tool_discovery": "tools/list",
             "tool_call": "tools/call",
@@ -5129,8 +5172,8 @@ def manage_theme_tool(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def report_issue_tool(args: dict[str, Any]) -> dict[str, Any]:
-    title = args.get("title") or args.get("summary") or "HA Admin MCP issue report"
-    body = args.get("body") or args.get("content") or args.get("description") or ""
+    title = redact_secrets(str(args.get("title") or args.get("summary") or "HA Admin MCP issue report"))
+    body = redact_secrets(str(args.get("body") or args.get("content") or args.get("description") or ""))
     report = {
         "title": title,
         "body": body,
@@ -5138,7 +5181,7 @@ def report_issue_tool(args: dict[str, Any]) -> dict[str, Any]:
         "system_overview": system_overview(),
         "tool_catalog": mcp_protocol_status(),
     }
-    return {"success": True, "report": report}
+    return {"success": True, "report": sanitize_metadata(report)}
 
 
 def list_lovelace_resources() -> dict[str, Any]:
@@ -8052,7 +8095,8 @@ class Handler(BaseHTTPRequestHandler):
                         "logging": {},
                     },
                     "_meta": {
-                        "endpointPath": MCP_PATH,
+                        "endpointPath": redacted_mcp_path(),
+                        "endpointPathRedacted": True,
                         "port": MCP_PORT,
                         "dangerous": True,
                         "supportedProtocolVersions": sorted(SUPPORTED_PROTOCOL_VERSIONS),
@@ -8122,7 +8166,7 @@ class Handler(BaseHTTPRequestHandler):
         return {
             "jsonrpc": "2.0",
             "id": request_id,
-            "error": {"code": code, "message": message},
+            "error": {"code": code, "message": redact_secrets(message)},
         }
 
     def write_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
@@ -8161,14 +8205,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[ha-admin-mcp] {self.address_string()} {fmt % args}", flush=True)
+        print(f"[ha-admin-mcp] {self.address_string()} {redact_secrets(fmt % args)}", flush=True)
 
 
 def main() -> None:
     host = str(OPTIONS.get("bind_host") or "0.0.0.0")
     print(
         "[ha-admin-mcp] EXTREMELY DANGEROUS server listening on "
-        f"{host}:{MCP_PORT}{MCP_PATH}; installing and starting this app grants admin MCP access",
+        f"{host}:{MCP_PORT}{redacted_mcp_path()}; installing and starting this app grants admin MCP access",
         flush=True,
     )
     ThreadingHTTPServer((host, MCP_PORT), Handler).serve_forever()
