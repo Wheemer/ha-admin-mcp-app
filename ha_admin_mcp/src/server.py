@@ -35,7 +35,7 @@ AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
 APP_ROOT = Path("/app")
 SAVED_TOOLS_PATH = Path(os.environ.get("CODE_MODE_SAVED_TOOLS_PATH", "/data/saved_tools.json"))
 MAX_READ_BYTES = 20_000_000
-SUPPORTED_PROTOCOL_VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
+SUPPORTED_PROTOCOL_VERSIONS = {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 S6_ENV_DIR = Path("/run/s6/container_environment")
 DEFAULT_MCP_PATH = "/mcp"
 MCP_PORT = 9583
@@ -7985,17 +7985,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             self.write_json({"error": "unauthorized"}, status=401)
             return
-        protocol_header = self.headers.get("MCP-Protocol-Version")
-        if protocol_header and protocol_header not in SUPPORTED_PROTOCOL_VERSIONS:
-            self.write_json(
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32600, "message": f"Unsupported MCP-Protocol-Version: {protocol_header}"},
-                },
-                status=400,
-            )
-            return
+        # Some remote MCP clients optimistically send newer protocol headers
+        # after initialize. Continue handling JSON-RPC instead of failing the
+        # transport; initialize still reports the negotiated version.
         length = int(self.headers.get("Content-Length", "0"))
         try:
             message = json.loads(self.rfile.read(length) or b"{}")
