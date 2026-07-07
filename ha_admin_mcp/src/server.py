@@ -32,6 +32,7 @@ from collections.abc import Callable
 ADDON_OPTIONS = Path("/data/options.json")
 CONFIG_ROOT = Path("/config")
 DEFAULT_BACKUP_DIR = Path("/backup/ha-admin-mcp")
+UPLOAD_SESSION_DIR = Path("/data/upload-sessions")
 SECRET_PATH_FILE = Path("/data/secret_path.txt")
 AUDIT_LOG = DEFAULT_BACKUP_DIR / "audit.log"
 APP_ROOT = Path("/app")
@@ -930,6 +931,12 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "force_tool_catalog_refresh",
+        "Stable backup refresh path for clients with stale native tool ingestion; returns catalog hash, list_changed notification, core categories, and proxy fallback instructions.",
+        {"include_tools": {"type": "boolean"}, "include_schema": {"type": "boolean"}, "category": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        [],
+    ),
+    tool_schema(
         "batch_call_tools",
         "Call multiple registered MCP tools sequentially and return per-call results",
         {
@@ -989,6 +996,61 @@ TOOLS = [
         ["path", "content"],
     ),
     tool_schema(
+        "upload_file_start",
+        "Start a chunked upload session. Chunks are staged inside the HA Admin MCP add-on until finalized.",
+        {
+            "target_path": {"type": "string", "description": "Optional intended final target path, relative to /config or absolute under /config."},
+            "expected_hash": {"type": "string", "description": "Expected sha256 of the complete uploaded payload."},
+            "total_size": {"type": "integer", "minimum": 0},
+            "label": {"type": "string"},
+            "overwrite": {"type": "boolean"},
+        },
+        [],
+    ),
+    tool_schema(
+        "upload_file_chunk",
+        "Append or place one base64 chunk into a chunked upload session.",
+        {
+            "upload_id": {"type": "string"},
+            "chunk_base64": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 0, "description": "Optional byte offset. Omit for append-only sequential upload."},
+            "chunk_index": {"type": "integer", "minimum": 0},
+        },
+        ["upload_id", "chunk_base64"],
+    ),
+    tool_schema(
+        "upload_file_status",
+        "Return chunked upload session status, current size, and current sha256.",
+        {"upload_id": {"type": "string"}},
+        ["upload_id"],
+    ),
+    tool_schema(
+        "upload_file_finalize",
+        "Finalize a chunked upload, verify hash/size, and optionally write or deploy the staged payload.",
+        {
+            "upload_id": {"type": "string"},
+            "expected_hash": {"type": "string"},
+            "total_size": {"type": "integer", "minimum": 0},
+            "target_path": {"type": "string"},
+            "mode": {"type": "string"},
+            "write": {"type": "boolean", "description": "Write staged content to target_path without custom-card resource update."},
+            "deploy_custom_card": {"type": "boolean", "description": "Run deploy_custom_card_bundle using the staged upload_id."},
+            "resource_url": {"type": "string"},
+            "resource_id": {"type": "string"},
+            "resource_type": {"type": "string"},
+            "cache_tag": {"type": "string"},
+            "write_gzip": {"type": "boolean"},
+            "backup": {"type": "boolean"},
+            "expected_current_hash": {"type": "string"},
+            "ha_url": {"type": "string"},
+            "fetch_served": {"type": "boolean"},
+            "cleanup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
+        },
+        ["upload_id"],
+    ),
+    tool_schema(
         "delete_path",
         "Delete any visible file or directory. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "recursive": {"type": "boolean"}, "force": {"type": "boolean"}, "dry_run": {"type": "boolean"}},
@@ -1043,6 +1105,10 @@ TOOLS = [
         {
             "target_path": {"type": "string"},
             "content_base64": {"type": "string"},
+            "upload_id": {"type": "string", "description": "Use a finalized/staged upload session instead of sending content_base64 again."},
+            "source_url": {"type": "string", "description": "Fetch bundle bytes server-side from this URL inside the HA add-on."},
+            "source_path": {"type": "string", "description": "Read bundle bytes from a path visible inside the HA add-on container. This cannot read Codex desktop paths unless that filesystem is mounted into HA."},
+            "source_headers": {"type": "object"},
             "resource_url": {"type": "string"},
             "resource_id": {"type": "string"},
             "resource_type": {"type": "string"},
@@ -1055,8 +1121,10 @@ TOOLS = [
             "expected_current_hash": {"type": "string", "description": "Optional precondition sha256 of the currently deployed target file"},
             "ha_url": {"type": "string"},
             "fetch_served": {"type": "boolean"},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
+            "cleanup_upload": {"type": "boolean"},
         },
-        ["target_path", "content_base64"],
+        ["target_path"],
     ),
     tool_schema(
         "inspect_media_file",
@@ -2204,9 +2272,9 @@ TOOL_NAMES = frozenset(TOOL_BY_NAME)
 IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET = frozenset(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
 HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET = frozenset(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES)
 CORE_ADMIN_TOOL_CATEGORIES = {
-    "identity": ["get_target_identity", "ha_mcp_get_identity", "ha_mcp_status", "mcp_diagnostics", "mcp_protocol_status", "mcp_advertisement", "refresh_tool_catalog"],
-    "discovery": ["ha_mcp_core_tools", "list_tools", "search_tools", "ha_search_tools", "call_tool", "mcp_call_tool", "ha_mcp_call_tool", "batch_call_tools"],
-    "files": ["stat_path", "list_dir", "list_config_files", "ha_list_files", "read_file", "read_file_base64", "read_config_file", "ha_read_file", "write_file", "write_file_base64", "write_config_file", "ha_write_file", "hash_file", "search_files", "glob_paths"],
+    "identity": ["get_target_identity", "ha_mcp_get_identity", "ha_mcp_status", "mcp_diagnostics", "mcp_protocol_status", "mcp_advertisement", "refresh_tool_catalog", "force_tool_catalog_refresh"],
+    "discovery": ["ha_mcp_core_tools", "list_tools", "search_tools", "ha_search_tools", "call_tool", "mcp_call_tool", "ha_mcp_call_tool", "batch_call_tools", "force_tool_catalog_refresh"],
+    "files": ["stat_path", "list_dir", "list_config_files", "ha_list_files", "read_file", "read_file_base64", "read_config_file", "ha_read_file", "write_file", "write_file_base64", "write_config_file", "ha_write_file", "upload_file_start", "upload_file_chunk", "upload_file_status", "upload_file_finalize", "hash_file", "search_files", "glob_paths"],
     "lovelace": ["live_lovelace_resources", "list_lovelace_resources", "ha_config_list_dashboard_resources", "set_lovelace_resource", "ha_config_set_dashboard_resource", "verify_custom_card_resource", "deploy_custom_card_bundle", "live_lovelace_find_cards", "live_lovelace_patch_card", "save_lovelace_dashboard", "restore_lovelace_backup"],
     "dashboards": ["list_lovelace_dashboards", "ha_config_get_dashboard", "get_lovelace_dashboard", "get_lovelace_dashboard_outline", "live_lovelace_get_config", "live_lovelace_get_outline", "ha_get_dashboard_screenshot"],
     "entities": ["get_state", "ha_get_state", "list_entities", "ha_search", "ha_get_entity", "ha_set_entity", "ha_search_entities", "get_history", "ha_get_history"],
@@ -2235,6 +2303,7 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
     "mcp_diagnostics",
     "ha_mcp_core_tools",
     "refresh_tool_catalog",
+    "force_tool_catalog_refresh",
     "batch_call_tools",
 }
 
@@ -2364,6 +2433,14 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return write_visible_file(args, binary=False)
     if name == "write_file_base64":
         return write_visible_file(args, binary=True)
+    if name == "upload_file_start":
+        return upload_file_start(args)
+    if name == "upload_file_chunk":
+        return upload_file_chunk(args)
+    if name == "upload_file_status":
+        return upload_file_status(args)
+    if name == "upload_file_finalize":
+        return upload_file_finalize(args)
     if name == "delete_path":
         return delete_visible_path(args)
     if name == "search_files":
@@ -2935,6 +3012,30 @@ def refresh_tool_catalog(args: dict[str, Any]) -> dict[str, Any]:
     else:
         result["catalog_summary"] = {"query": catalog["query"], "count": catalog["count"], "total": catalog["total"]}
     return result
+
+
+def force_tool_catalog_refresh(args: dict[str, Any]) -> dict[str, Any]:
+    native_tool_names.cache_clear()
+    native_tools.cache_clear()
+    tool_catalog_fingerprint.cache_clear()
+    catalog = refresh_tool_catalog(args)
+    categories = ha_mcp_core_tools({"category": args.get("category") or "", "include_schema": bool(args.get("include_schema"))})
+    return {
+        "success": True,
+        "refreshed": True,
+        "catalog_hash": tool_catalog_fingerprint(),
+        "mcp_notification": {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+        "native_toolset": native_toolset_mode(),
+        "native_tool_count": len(native_tools()),
+        "registered_tool_count": len(TOOLS),
+        "catalog": catalog,
+        "core_tools": categories,
+        "fallback": {
+            "when_native_tools_are_stale": "Use mcp_call_tool or ha_mcp_call_tool with {name, arguments}; those stable proxy tools can call newly added tools before the client refreshes native wrappers.",
+            "example": {"name": "mcp_call_tool", "arguments": {"name": "ha_mcp_core_tools", "arguments": {"category": "files"}}},
+            "note": "A client may still need to re-list MCP tools to expose new first-class native wrappers; this tool provides a no-restart fallback path.",
+        },
+    }
 
 
 def classify_tool_error(err: Exception) -> str:
@@ -5711,6 +5812,155 @@ def file_proof(path: Path) -> dict[str, Any]:
     return path_info(path) | {"sha256": path_hash(path)}
 
 
+def upload_session_paths(upload_id: str) -> tuple[Path, Path]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{12,80}", str(upload_id or "")):
+        raise ValueError("upload_id is invalid")
+    UPLOAD_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    return UPLOAD_SESSION_DIR / f"{upload_id}.part", UPLOAD_SESSION_DIR / f"{upload_id}.json"
+
+
+def upload_session_meta(upload_id: str) -> dict[str, Any]:
+    data_path, meta_path = upload_session_paths(upload_id)
+    if not meta_path.exists():
+        raise ValueError(f"upload session not found: {upload_id}")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    size = data_path.stat().st_size if data_path.exists() else 0
+    meta["current_size"] = size
+    meta["sha256"] = path_hash(data_path)
+    return meta
+
+
+def upload_file_start(args: dict[str, Any]) -> dict[str, Any]:
+    UPLOAD_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    upload_id = secrets.token_urlsafe(18).replace("-", "_")
+    data_path, meta_path = upload_session_paths(upload_id)
+    if data_path.exists():
+        data_path.unlink()
+    data_path.touch()
+    meta = {
+        "upload_id": upload_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "target_path": args.get("target_path"),
+        "expected_hash": args.get("expected_hash"),
+        "total_size": args.get("total_size"),
+        "label": args.get("label"),
+        "overwrite": bool(args.get("overwrite", True)),
+        "staging_path": str(data_path),
+        "note": "source_path values are resolved inside the HA Admin MCP add-on container, not on the Codex desktop.",
+    }
+    meta_path.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    audit_event("upload_file_start", {"upload_id": upload_id, "target_path": args.get("target_path"), "total_size": args.get("total_size")})
+    return {"success": True, "upload_id": upload_id, "staging_path": str(data_path), "meta": meta}
+
+
+def upload_file_chunk(args: dict[str, Any]) -> dict[str, Any]:
+    upload_id = str(args["upload_id"])
+    data_path, _meta_path = upload_session_paths(upload_id)
+    if not data_path.exists():
+        raise ValueError(f"upload session not found: {upload_id}")
+    chunk = base64.b64decode(args["chunk_base64"])
+    offset = args.get("offset")
+    mode = "append"
+    if offset is None:
+        with data_path.open("ab") as handle:
+            handle.write(chunk)
+    else:
+        mode = "offset"
+        with data_path.open("r+b") as handle:
+            handle.seek(int(offset))
+            handle.write(chunk)
+    result = file_proof(data_path)
+    return {"success": True, "upload_id": upload_id, "mode": mode, "chunk_bytes": len(chunk), "current_size": result.get("size"), "sha256": result.get("sha256")}
+
+
+def upload_file_status(args: dict[str, Any]) -> dict[str, Any]:
+    return {"success": True, "upload": upload_session_meta(str(args["upload_id"]))}
+
+
+def verify_upload_payload(upload_id: str, args: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    data_path, _meta_path = upload_session_paths(upload_id)
+    if not data_path.exists():
+        raise ValueError(f"upload session not found: {upload_id}")
+    proof = file_proof(data_path)
+    expected_hash = args.get("expected_hash") or upload_session_meta(upload_id).get("expected_hash")
+    if expected_hash and str(expected_hash).lower() != str(proof.get("sha256")).lower():
+        raise ValueError(f"expected_hash mismatch for upload {upload_id}: expected {expected_hash}, actual {proof.get('sha256')}")
+    expected_size = args.get("total_size") if args.get("total_size") is not None else upload_session_meta(upload_id).get("total_size")
+    if expected_size is not None and int(expected_size) != int(proof.get("size") or 0):
+        raise ValueError(f"total_size mismatch for upload {upload_id}: expected {expected_size}, actual {proof.get('size')}")
+    return data_path, proof
+
+
+def cleanup_upload(upload_id: str) -> None:
+    data_path, meta_path = upload_session_paths(upload_id)
+    for path in (data_path, meta_path):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def upload_file_finalize(args: dict[str, Any]) -> dict[str, Any]:
+    upload_id = str(args["upload_id"])
+    data_path, proof = verify_upload_payload(upload_id, args)
+    cleanup = bool(args.get("cleanup", True))
+    if bool(args.get("deploy_custom_card")):
+        deploy_args = dict(args)
+        deploy_args["upload_id"] = upload_id
+        deploy_args["target_path"] = args.get("target_path") or upload_session_meta(upload_id).get("target_path")
+        deploy_args["expected_hash"] = args.get("expected_hash") or proof.get("sha256")
+        if not deploy_args.get("target_path"):
+            raise ValueError("target_path is required to deploy a finalized upload")
+        result = deploy_custom_card_bundle(deploy_args)
+        if cleanup and not bool(args.get("dry_run")):
+            cleanup_upload(upload_id)
+        return {"success": True, "upload_id": upload_id, "upload": proof, "deployed": result, "cleaned_up": cleanup and not bool(args.get("dry_run"))}
+    if bool(args.get("write")):
+        target = args.get("target_path") or upload_session_meta(upload_id).get("target_path")
+        if not target:
+            raise ValueError("target_path is required when write=true")
+        result = write_visible_file({"path": target, "content_base64": base64.b64encode(data_path.read_bytes()).decode(), "mode": args.get("mode"), "dry_run": bool(args.get("dry_run")), "expected_hash": args.get("expected_current_hash")}, binary=True)
+        if cleanup and not bool(args.get("dry_run")):
+            cleanup_upload(upload_id)
+        return {"success": True, "upload_id": upload_id, "upload": proof, "write": result, "cleaned_up": cleanup and not bool(args.get("dry_run"))}
+    return {"success": True, "upload_id": upload_id, "upload": proof, "staged_path": str(data_path), "finalized": True, "cleaned_up": False}
+
+
+def read_deploy_bundle_bytes(args: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    sources = [name for name in ("content_base64", "upload_id", "source_url", "source_path") if args.get(name)]
+    if len(sources) != 1:
+        raise ValueError("Pass exactly one bundle source: content_base64, upload_id, source_url, or source_path. For large bundles, prefer upload_id or source_url.")
+    source = sources[0]
+    max_bytes = int(args.get("max_bytes") or 100_000_000)
+    if source == "content_base64":
+        data = base64.b64decode(args["content_base64"])
+        if len(data) > 128_000:
+            guidance = "Large inline content_base64 payload detected. Prefer upload_file_start/upload_file_chunk/upload_file_finalize or source_url for custom-card bundles."
+        else:
+            guidance = None
+        return data, {"source": "content_base64", "bytes": len(data), "guidance": guidance}
+    if source == "upload_id":
+        data_path, proof = verify_upload_payload(str(args["upload_id"]), args)
+        return data_path.read_bytes(), {"source": "upload_id", "upload_id": args["upload_id"], "proof": proof}
+    if source == "source_path":
+        source_path = str(args["source_path"])
+        if re.match(r"^[A-Za-z]:[\\/]", source_path):
+            raise ValueError("source_path is resolved inside the HA Admin MCP add-on container and cannot read Codex desktop Windows paths. Use chunked upload or source_url instead.")
+        path = visible_path(source_path, require=True)
+        if not path.is_file():
+            raise ValueError(f"source_path is not a file visible inside the HA add-on container: {path}")
+        data = path.read_bytes()
+        return data, {"source": "source_path", "source_path": str(path), "sha256": hashlib.sha256(data).hexdigest()}
+    headers = {str(key): str(value) for key, value in (args.get("source_headers") or {}).items()}
+    request = urllib.request.Request(str(args["source_url"]), headers=headers)
+    with urllib.request.urlopen(request, timeout=120) as response:
+        data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError(f"source_url payload exceeds max_bytes={max_bytes}")
+        return data, {"source": "source_url", "source_url": redact_secrets(str(args["source_url"])), "status": response.status, "headers": sanitize_metadata(dict(response.headers.items()))}
+
+
 def fetch_served_resource(url: str, args: dict[str, Any]) -> dict[str, Any]:
     if not bool(args.get("fetch_served")):
         return {"skipped": True, "reason": "fetch_served is false"}
@@ -5783,7 +6033,7 @@ def deploy_custom_card_bundle(args: dict[str, Any]) -> dict[str, Any]:
     www = config_path("www").resolve()
     if path.resolve() != www and www not in path.resolve().parents:
         raise ValueError("target_path must stay under /config/www for custom-card deployment")
-    data = base64.b64decode(args["content_base64"])
+    data, source_info = read_deploy_bundle_bytes(args)
     content_hash = hashlib.sha256(data).hexdigest()
     if args.get("expected_hash") and str(args["expected_hash"]).lower() != content_hash:
         raise ValueError(f"expected_hash mismatch for supplied content: expected {args['expected_hash']}, actual {content_hash}")
@@ -5796,15 +6046,24 @@ def deploy_custom_card_bundle(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Could not infer resource_url from target_path; pass resource_url")
     cache_tag = str(args.get("cache_tag") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
     new_resource_url = resource_url_with_cache_tag(resource_url, cache_tag)
-    resources_before = list_lovelace_resources()
-    existing_resource = find_lovelace_resource_loose(resources_before["resources"], args.get("resource_id"), resource_url)
+    resource_lookup_error = None
+    try:
+        resources_before = list_lovelace_resources()
+        existing_resource = find_lovelace_resource_loose(resources_before["resources"], args.get("resource_id"), resource_url)
+    except Exception as err:
+        if not bool(args.get("dry_run")):
+            raise
+        existing_resource = None
+        resource_lookup_error = structured_tool_error(err, "list_lovelace_resources", {})
     planned = {
         "target_path": str(path),
         "bytes": len(data),
         "sha256": content_hash,
         "gzip_path": str(gzip_path),
         "write_gzip": bool(args.get("write_gzip", True)),
+        "source": source_info,
         "resource_before": existing_resource,
+        "resource_lookup_error": resource_lookup_error,
         "resource_after_url": new_resource_url,
     }
     if bool(args.get("dry_run")):
@@ -5824,11 +6083,17 @@ def deploy_custom_card_bundle(args: dict[str, Any]) -> dict[str, Any]:
     after_file = file_proof(path)
     served = fetch_served_resource(new_resource_url, args)
     audit_event("deploy_custom_card_bundle", {"path": str(path), "bytes": len(data), "sha256": after_file.get("sha256"), "resource_url": new_resource_url, "backup": backup})
+    cleaned_up_upload = False
+    if args.get("upload_id") and bool(args.get("cleanup_upload", True)):
+        cleanup_upload(str(args["upload_id"]))
+        cleaned_up_upload = True
     return {
         "success": True,
         "changed": True,
         "path": str(path),
         "backup": backup,
+        "source": source_info,
+        "cleaned_up_upload": cleaned_up_upload,
         "before": {"file": before_file, "gzip": before_gzip, "resource": existing_resource},
         "after": {"file": after_file, "gzip": gzip_written, "resource": resource_result.get("after"), "served": served},
         "resource_update": resource_result,
@@ -8855,6 +9120,7 @@ DIRECT_TOOL_HANDLERS = {
     "mcp_diagnostics": lambda args: mcp_diagnostics(args),
     "ha_mcp_core_tools": lambda args: ha_mcp_core_tools(args),
     "refresh_tool_catalog": lambda args: refresh_tool_catalog(args),
+    "force_tool_catalog_refresh": lambda args: force_tool_catalog_refresh(args),
     "batch_call_tools": lambda args: batch_call_tools(args),
 }
 
