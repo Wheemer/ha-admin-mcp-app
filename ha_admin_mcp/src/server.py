@@ -20,6 +20,7 @@ import uuid
 import glob
 import hashlib
 import functools
+import gzip
 import socket
 import struct
 from datetime import datetime, timedelta, timezone
@@ -933,6 +934,10 @@ TOOLS = [
             "path": {"type": "string"},
             "query": {"type": "string"},
             "filename": {"type": "string"},
+            "sort": {"type": "string", "enum": ["name", "modified", "size"]},
+            "descending": {"type": "boolean"},
+            "newest_only": {"type": "boolean"},
+            "include_hash": {"type": "boolean"},
             "recursive": {"type": "boolean"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
             "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
@@ -950,6 +955,41 @@ TOOLS = [
         "Return cryptographic hashes for a visible file. Relative paths are /config-relative.",
         {"path": {"type": "string"}, "algorithm": {"type": "string"}},
         ["path"],
+    ),
+    tool_schema(
+        "verify_custom_card_resource",
+        "Resolve a Lovelace custom-card resource URL to its /config/www file and verify resource registry, file hash/size, gzip, and optional served URL",
+        {
+            "url": {"type": "string"},
+            "resource_id": {"type": "string"},
+            "resource_query": {"type": "string"},
+            "path": {"type": "string"},
+            "ha_url": {"type": "string"},
+            "fetch_served": {"type": "boolean"},
+            "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000},
+        },
+        [],
+    ),
+    tool_schema(
+        "deploy_custom_card_bundle",
+        "Write a custom-card JS bundle under /config/www, optionally gzip it, bump/update Lovelace resource cache tag, and return before/after proof",
+        {
+            "target_path": {"type": "string"},
+            "content_base64": {"type": "string"},
+            "resource_url": {"type": "string"},
+            "resource_id": {"type": "string"},
+            "resource_type": {"type": "string"},
+            "cache_tag": {"type": "string"},
+            "write_gzip": {"type": "boolean"},
+            "backup": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
+            "expected_hash": {"type": "string", "description": "Expected sha256 of the supplied content_base64 payload"},
+            "expected_current_hash": {"type": "string", "description": "Optional precondition sha256 of the currently deployed target file"},
+            "ha_url": {"type": "string"},
+            "fetch_served": {"type": "boolean"},
+        },
+        ["target_path", "content_base64"],
     ),
     tool_schema(
         "inspect_media_file",
@@ -1243,11 +1283,16 @@ TOOLS = [
     ),
     tool_schema(
         "list_config_files",
-        "List files under /config with optional recursion and pattern filtering",
+        "List files under /config with optional recursion, pattern filtering, sorting, and hashes",
         {
             "path": {"type": "string"},
             "pattern": {"type": "string"},
+            "filename": {"type": "string"},
             "recursive": {"type": "boolean"},
+            "sort": {"type": "string", "enum": ["name", "modified", "size"]},
+            "descending": {"type": "boolean"},
+            "newest_only": {"type": "boolean"},
+            "include_hash": {"type": "boolean"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 10000},
         },
         [],
@@ -1770,19 +1815,19 @@ TOOLS = [
     tool_schema(
         "live_lovelace_find_cards",
         "Find cards in active Lovelace config through the Home Assistant WebSocket API",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "custom_type": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
         [],
     ),
     tool_schema(
         "live_lovelace_get_card",
         "Read exactly one card from active Lovelace config through the Home Assistant WebSocket API",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}},
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "custom_type": {"type": "string"}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}},
         [],
     ),
     tool_schema(
         "live_lovelace_patch_card",
         "Patch exactly one card and save through the Home Assistant WebSocket API instead of storage writes. Non-dry-run writes require force=true.",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "verify": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean", "description": "Required for actual dashboard writes. Omit or false only with dry_run=true.", "default": False}},
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "custom_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "verify": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean", "description": "Required for actual dashboard writes. Omit or false only with dry_run=true.", "default": False}},
         [],
     ),
     tool_schema(
@@ -2245,6 +2290,10 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return glob_paths(args["pattern"], int(args.get("limit") or 500))
     if name == "hash_file":
         return hash_file(visible_path(args.get("path")), args.get("algorithm") or "sha256")
+    if name == "verify_custom_card_resource":
+        return verify_custom_card_resource(args)
+    if name == "deploy_custom_card_bundle":
+        return deploy_custom_card_bundle(args)
     if name == "inspect_media_file":
         return inspect_media_file(args)
     if name == "ha_api":
@@ -4887,6 +4936,8 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "expected_hash": args.get("expected_hash"),
         }
         if name == "ha_config_get_dashboard":
+            if bool(args.get("list_only") or args.get("list")):
+                return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
             return get_lovelace_dashboard(dash_args, int(args.get("max_bytes") or MAX_READ_BYTES))
         if name == "ha_config_set_dashboard":
             return save_lovelace_dashboard(dash_args)
@@ -5418,10 +5469,37 @@ def find_lovelace_resource(resources: list[dict[str, Any]], identifier: Any = No
     return None
 
 
+def resource_url_without_query(url: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url))
+    path = parsed.path or str(url).split("?", 1)[0]
+    return path
+
+
+def resource_url_with_cache_tag(url: str, tag: str) -> str:
+    parsed = urllib.parse.urlsplit(str(url))
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    key = "v"
+    query = [(name, value) for name, value in query if name not in ("v", "cache", "cache_bust", "cb")]
+    query.append((key, tag))
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query), parsed.fragment))
+
+
+def find_lovelace_resource_loose(resources: list[dict[str, Any]], identifier: Any = None, url: str | None = None) -> dict[str, Any] | None:
+    exact = find_lovelace_resource(resources, identifier, url)
+    if exact:
+        return exact
+    base_url = resource_url_without_query(url) if url else None
+    if base_url:
+        for item in resources:
+            if resource_url_without_query(str(item.get("url") or "")) == base_url:
+                return item
+    return None
+
+
 def set_lovelace_resource(args: dict[str, Any]) -> dict[str, Any]:
     payload = lovelace_resource_payload(args)
     resources = list_lovelace_resources()["resources"]
-    existing = find_lovelace_resource(resources, payload.get("id"), payload["url"])
+    existing = find_lovelace_resource_loose(resources, payload.get("id"), payload["url"])
     if existing:
         command = {
             "type": "lovelace/resources/update",
@@ -5440,7 +5518,158 @@ def set_lovelace_resource(args: dict[str, Any]) -> dict[str, Any]:
     if bool(args.get("dry_run")):
         return {"success": True, "dry_run": True, "action": action, "existing": existing, "command": command}
     result = ws_result(command)
-    return {"success": True, "action": action, "existing": existing, "result": result, "resources": list_lovelace_resources()}
+    resources_after = list_lovelace_resources()
+    return {"success": True, "action": action, "before": existing, "after": find_lovelace_resource_loose(resources_after["resources"], payload.get("id"), payload["url"]), "result": result, "resources": resources_after}
+
+
+def custom_card_path_from_resource_url(url: str) -> Path | None:
+    path = urllib.parse.unquote(resource_url_without_query(url))
+    if path.startswith("/hacsfiles/"):
+        return config_path(str(Path("www") / "community" / path.removeprefix("/hacsfiles/")))
+    if path.startswith("/local/"):
+        return config_path(str(Path("www") / path.removeprefix("/local/")))
+    return None
+
+
+def resource_url_from_custom_card_path(path: Path) -> str | None:
+    target = path.resolve()
+    www = config_path("www").resolve()
+    community = (www / "community").resolve()
+    if target == community or community in target.parents:
+        rel = target.relative_to(community).as_posix()
+        return f"/hacsfiles/{rel}"
+    if target == www or www in target.parents:
+        rel = target.relative_to(www).as_posix()
+        return f"/local/{rel}"
+    return None
+
+
+def file_proof(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"path": str(path), "exists": False}
+    return path_info(path) | {"sha256": path_hash(path)}
+
+
+def fetch_served_resource(url: str, args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("fetch_served")):
+        return {"skipped": True, "reason": "fetch_served is false"}
+    ha_url = str(args.get("ha_url") or "").rstrip("/")
+    if not ha_url:
+        return {"skipped": True, "reason": "ha_url not provided"}
+    served_url = urllib.parse.urljoin(ha_url + "/", resource_url_without_query(url).lstrip("/"))
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.query:
+        served_url += "?" + parsed.query
+    headers = {}
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(served_url, headers=headers)
+    max_bytes = int(args.get("max_bytes") or MAX_READ_BYTES)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = response.read(max_bytes + 1)
+            truncated = len(data) > max_bytes
+            if truncated:
+                data = data[:max_bytes]
+            return {
+                "url": served_url,
+                "status": response.status,
+                "headers": dict(response.headers.items()),
+                "size": len(data),
+                "truncated": truncated,
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+    except Exception as err:
+        return {"url": served_url, "error": redact_secrets(str(err))}
+
+
+def verify_custom_card_resource(args: dict[str, Any]) -> dict[str, Any]:
+    resources = list_lovelace_resources()["resources"]
+    resource = None
+    url = args.get("url")
+    if args.get("resource_id") or url:
+        resource = find_lovelace_resource_loose(resources, args.get("resource_id"), str(url) if url else None)
+    if not resource and args.get("resource_query"):
+        query = str(args["resource_query"]).lower()
+        resource = next((item for item in resources if query in str(item.get("url") or "").lower()), None)
+    if resource and not url:
+        url = resource.get("url")
+    path = config_path(args["path"]) if args.get("path") else custom_card_path_from_resource_url(str(url or ""))
+    file_result = file_proof(path) if path else {"exists": False, "error": "Resource URL is not /hacsfiles/... or /local/...; pass path explicitly"}
+    gzip_path = Path(str(path) + ".gz") if path else None
+    gzip_result = file_proof(gzip_path) if gzip_path else {"exists": False}
+    served = fetch_served_resource(str(url), args) if url else {"skipped": True, "reason": "resource URL not known"}
+    return {
+        "success": True,
+        "resource": resource,
+        "resource_url": url,
+        "resource_base_url": resource_url_without_query(str(url)) if url else None,
+        "resolved_path": str(path) if path else None,
+        "file": file_result,
+        "gzip": gzip_result,
+        "served": served,
+    }
+
+
+def deploy_custom_card_bundle(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("dry_run")) and not bool(args.get("force")):
+        raise ValueError("deploy_custom_card_bundle requires force=true for actual writes")
+    path = config_path(args["target_path"])
+    www = config_path("www").resolve()
+    if path.resolve() != www and www not in path.resolve().parents:
+        raise ValueError("target_path must stay under /config/www for custom-card deployment")
+    data = base64.b64decode(args["content_base64"])
+    content_hash = hashlib.sha256(data).hexdigest()
+    if args.get("expected_hash") and str(args["expected_hash"]).lower() != content_hash:
+        raise ValueError(f"expected_hash mismatch for supplied content: expected {args['expected_hash']}, actual {content_hash}")
+    require_expected_hash(path, args.get("expected_current_hash"))
+    before_file = file_proof(path)
+    gzip_path = Path(str(path) + ".gz")
+    before_gzip = file_proof(gzip_path)
+    resource_url = str(args.get("resource_url") or resource_url_from_custom_card_path(path) or "")
+    if not resource_url:
+        raise ValueError("Could not infer resource_url from target_path; pass resource_url")
+    cache_tag = str(args.get("cache_tag") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
+    new_resource_url = resource_url_with_cache_tag(resource_url, cache_tag)
+    resources_before = list_lovelace_resources()
+    existing_resource = find_lovelace_resource_loose(resources_before["resources"], args.get("resource_id"), resource_url)
+    planned = {
+        "target_path": str(path),
+        "bytes": len(data),
+        "sha256": content_hash,
+        "gzip_path": str(gzip_path),
+        "write_gzip": bool(args.get("write_gzip", True)),
+        "resource_before": existing_resource,
+        "resource_after_url": new_resource_url,
+    }
+    if bool(args.get("dry_run")):
+        return {"success": True, "changed": False, "dry_run": True, "before": {"file": before_file, "gzip": before_gzip}, "planned": planned}
+    backup = backup_path(path, args.get("label") or path.name) if path.exists() and bool(args.get("backup", True)) else None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    gzip_written = None
+    if bool(args.get("write_gzip", True)):
+        gzip_path.write_bytes(gzip.compress(data))
+        gzip_written = file_proof(gzip_path)
+    resource_result = set_lovelace_resource({
+        "id": args.get("resource_id") or (existing_resource or {}).get("id"),
+        "url": new_resource_url,
+        "resource_type": args.get("resource_type") or (existing_resource or {}).get("type") or "module",
+    })
+    after_file = file_proof(path)
+    served = fetch_served_resource(new_resource_url, args)
+    audit_event("deploy_custom_card_bundle", {"path": str(path), "bytes": len(data), "sha256": after_file.get("sha256"), "resource_url": new_resource_url, "backup": backup})
+    return {
+        "success": True,
+        "changed": True,
+        "path": str(path),
+        "backup": backup,
+        "before": {"file": before_file, "gzip": before_gzip, "resource": existing_resource},
+        "after": {"file": after_file, "gzip": gzip_written, "resource": resource_result.get("after"), "served": served},
+        "resource_update": resource_result,
+    }
+
 
 
 def delete_lovelace_resource(args: dict[str, Any]) -> dict[str, Any]:
@@ -5642,13 +5871,11 @@ def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
     query = str(args.get("query") or "").lower()
     filename = args.get("filename")
     recursive = bool(args.get("recursive", True))
-    limit = int(args.get("limit") or 100)
+    limit = int(args.get("limit") or (20 if bool(args.get("newest_only")) else 100))
     max_file_bytes = int(args.get("max_file_bytes") or 2_000_000)
     iterator = [root] if root.is_file() else root.rglob("*") if recursive else root.iterdir()
     matches: list[dict[str, Any]] = []
     for path in iterator:
-        if len(matches) >= limit:
-            break
         try:
             filename_match = file_matches_pattern(path, root, str(filename)) if filename else False
             if filename and not filename_match:
@@ -5668,7 +5895,7 @@ def search_files(args: dict[str, Any]) -> list[dict[str, Any]]:
                     break
         except OSError as err:
             matches.append({"path": str(path), "error": str(err)})
-    return matches
+    return sort_and_limit_file_rows(matches, args, limit, include_hash=bool(args.get("include_hash")))
 
 
 def file_match_row(path: Path, root: Path, match: str) -> dict[str, Any]:
@@ -5677,7 +5904,42 @@ def file_match_row(path: Path, root: Path, match: str) -> dict[str, Any]:
         row["relative_path"] = str(path.resolve().relative_to(root.resolve())).replace("\\", "/")
     except ValueError:
         pass
+    try:
+        stat = path.stat()
+        row["size"] = stat.st_size
+        row["modified"] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+    except OSError:
+        pass
     return row
+
+
+def file_row_sort_value(row: dict[str, Any], sort_key: str) -> Any:
+    if sort_key == "modified":
+        try:
+            return float(row.get("modified") or 0)
+        except (TypeError, ValueError):
+            return str(row.get("modified") or "")
+    if sort_key == "size":
+        return int(row.get("size") or 0)
+    return str(row.get("relative_path") or row.get("name") or row.get("path") or "").lower()
+
+
+def sort_and_limit_file_rows(rows: list[dict[str, Any]], args: dict[str, Any], limit: int, *, include_hash: bool = False) -> list[dict[str, Any]]:
+    sort_key = str(args.get("sort") or ("modified" if bool(args.get("newest_only")) else "name"))
+    if sort_key not in ("name", "modified", "size"):
+        sort_key = "name"
+    descending = bool(args.get("descending")) or bool(args.get("newest_only"))
+    rows.sort(key=lambda row: file_row_sort_value(row, sort_key), reverse=descending)
+    limited = rows[:limit]
+    if include_hash:
+        for row in limited:
+            try:
+                path = Path(str(row.get("path") or ""))
+                if path.is_file():
+                    row["sha256"] = path_hash(path)
+            except OSError as err:
+                row["hash_error"] = str(err)
+    return limited
 
 
 def file_matches_pattern(path: Path, root: Path, pattern: str) -> bool:
@@ -5744,19 +6006,19 @@ def config_path(path: str) -> Path:
 
 def list_config_files(args: dict[str, Any]) -> dict[str, Any]:
     root = config_path(args.get("path") or ".")
-    pattern = args.get("pattern") or "*"
+    pattern = args.get("filename") or args.get("pattern") or "*"
     recursive = bool(args.get("recursive", False))
-    limit = int(args.get("limit") or 500)
+    limit = int(args.get("limit") or (20 if bool(args.get("newest_only")) else 500))
     iterator = root.rglob(pattern) if recursive else root.glob(pattern)
     rows = []
     for path in iterator:
-        if len(rows) >= limit:
-            break
         try:
             rows.append(path_info(path) | {"relative_path": str(path.relative_to(CONFIG_ROOT))})
         except OSError as err:
             rows.append({"path": str(path), "error": str(err)})
-    return {"root": str(root), "count": len(rows), "files": rows}
+    total = len(rows)
+    rows = sort_and_limit_file_rows(rows, args, limit, include_hash=bool(args.get("include_hash")))
+    return {"root": str(root), "pattern": pattern, "count": len(rows), "total_matches": total, "truncated": total > len(rows), "files": rows}
 
 
 def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
@@ -7317,7 +7579,7 @@ def live_lovelace_get_outline(args: dict[str, Any]) -> dict[str, Any]:
 def live_lovelace_find_cards(args: dict[str, Any]) -> dict[str, Any]:
     config = live_lovelace_config(args)
     matches = live_lovelace_find_card_rows(config, args)
-    return {"preferred_path": True, "count": len(matches), "matches": matches}
+    return {"preferred_path": True, "searched_nested": True, "count": len(matches), "matches": matches}
 
 
 def live_lovelace_find_card_rows(config: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
@@ -7740,7 +8002,10 @@ def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
         return False
     if args.get("view_path") and str(row.get("view_path") or "") != str(args["view_path"]):
         return False
-    if args.get("card_type") and row.get("type") != args["card_type"]:
+    wanted_type = args.get("card_type") or args.get("custom_type")
+    if args.get("custom_type") and wanted_type and not str(wanted_type).startswith("custom:"):
+        wanted_type = f"custom:{wanted_type}"
+    if wanted_type and row.get("type") != wanted_type:
         return False
     title_filter = str(args.get("title") or args.get("name") or "").lower()
     if title_filter and title_filter not in str(row.get("title") or "").lower():
@@ -7787,8 +8052,8 @@ def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
                 row["view_path"] = view.get("path") if isinstance(view, dict) else None
                 matches.append(row)
                 if len(matches) >= limit:
-                    return {"item": item, "key": key, "count": len(matches), "matches": matches}
-    return {"item": item, "key": key, "count": len(matches), "matches": matches}
+                    return {"item": item, "key": key, "searched_nested": True, "count": len(matches), "matches": matches}
+    return {"item": item, "key": key, "searched_nested": True, "count": len(matches), "matches": matches}
 
 
 def get_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
