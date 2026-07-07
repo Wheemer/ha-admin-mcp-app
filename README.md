@@ -98,6 +98,11 @@ Backups created by this app are written under:
 
 They are not kept in live `/config` folders.
 
+Lovelace dashboard backups created by the app are first-class recovery targets:
+use `list_lovelace_backups`, `read_lovelace_backup`, and `restore_lovelace_backup`.
+Restore defaults to the live Lovelace WebSocket API, and replacing a populated dashboard
+with `views: []` requires explicit `force_empty=true`.
+
 ## Tool Refresh Workflow
 
 Some MCP clients cache or transform the native tool list when they connect. This app defaults to a compact native `tools/list` front door so clients do not have to ingest the full administrative catalog at startup.
@@ -110,6 +115,6 @@ The app supports the expected MCP server avenues for Codex-style HTTP clients: i
 
 ## Notes
 
-Dashboard UI changes should prefer the live Lovelace tools or the Home Assistant UI path. Storage-backed Lovelace edits are intentionally warned against because changing `.storage` is not good proof that the rendered UI changed.
+Dashboard UI changes should prefer the live Lovelace tools or the Home Assistant UI path. Storage-backed Lovelace writes are intentionally force-gated because changing `.storage` is not good proof that the rendered UI changed.
 
 For the full tool list and implementation details, see [ha_admin_mcp/README.md](ha_admin_mcp/README.md).
