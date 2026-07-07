@@ -5924,7 +5924,11 @@ def upload_file_finalize(args: dict[str, Any]) -> dict[str, Any]:
         if cleanup and not bool(args.get("dry_run")):
             cleanup_upload(upload_id)
         return {"success": True, "upload_id": upload_id, "upload": proof, "write": result, "cleaned_up": cleanup and not bool(args.get("dry_run"))}
-    return {"success": True, "upload_id": upload_id, "upload": proof, "staged_path": str(data_path), "finalized": True, "cleaned_up": False}
+    cleaned_up = False
+    if cleanup and not bool(args.get("dry_run")):
+        cleanup_upload(upload_id)
+        cleaned_up = True
+    return {"success": True, "upload_id": upload_id, "upload": proof, "staged_path": str(data_path), "finalized": True, "cleaned_up": cleaned_up}
 
 
 def read_deploy_bundle_bytes(args: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
