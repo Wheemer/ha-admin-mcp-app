@@ -2897,8 +2897,17 @@ def mcp_diagnostics(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def structured_tool_error(err: Exception, tool_name: str | None = None, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    actual_tool = tool_name
+    actual_args = args or {}
+    if tool_name in {"call_tool", "mcp_call_tool", "ha_mcp_call_tool"} and isinstance(args, dict):
+        nested = args.get("name") or args.get("tool")
+        if nested:
+            actual_tool = str(nested)
+            nested_args = args.get("arguments")
+            actual_args = nested_args if isinstance(nested_args, dict) else {}
     meta: dict[str, Any] = {
-        "tool": tool_name,
+        "tool": actual_tool,
+        "proxy_tool": tool_name if actual_tool != tool_name else None,
         "category": classify_tool_error(err),
         "message": redact_secrets(str(err)),
         "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
@@ -2908,11 +2917,11 @@ def structured_tool_error(err: Exception, tool_name: str | None = None, args: di
         "registered_tool_count": len(TOOLS),
         "diagnostic_tools": ["mcp_diagnostics", "mcp_protocol_status", "refresh_tool_catalog", "list_tools", "search_tools"],
     }
-    if tool_name:
-        meta["tool_lookup"] = tool_lookup_diagnostics(tool_name)
-    if args and ("lovelace" in str(tool_name or "") or "dashboard" in str(err).lower()):
+    if actual_tool:
+        meta["tool_lookup"] = tool_lookup_diagnostics(actual_tool)
+    if actual_args and ("lovelace" in str(actual_tool or "") or "dashboard" in str(err).lower()):
         try:
-            meta["dashboard_resolution"] = dashboard_resolution_diagnostics(args)
+            meta["dashboard_resolution"] = dashboard_resolution_diagnostics(actual_args)
         except Exception as diag_err:
             meta["dashboard_resolution_error"] = redact_secrets(str(diag_err))
     if meta["category"] == "auth":
@@ -7484,7 +7493,7 @@ def load_lovelace_registry() -> dict[str, Any]:
 
 
 def dashboard_item_key(item: dict[str, Any]) -> str:
-    if item.get("id") == "lovelace" and not item.get("url_path"):
+    if item.get("id") == "lovelace" or item.get("url_path") in (None, "", "lovelace", "default"):
         return "lovelace"
     return lovelace_dashboard_key(item["id"])
 
