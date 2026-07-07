@@ -850,6 +850,12 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "mcp_diagnostics",
+        "Return target identity, catalog fingerprint, native exposure counts, and optional focused tool/dashboard diagnostics",
+        {"tool": {"type": "string"}, "dashboard": {"type": "string"}, "include_tools": {"type": "boolean"}, "include_identity": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
         "refresh_tool_catalog",
         "Return the current tool catalog fingerprint and MCP list-changed notification payload",
         {"include_tools": {"type": "boolean"}, "include_schema": {"type": "boolean"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
@@ -2100,6 +2106,7 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
     "mcp_call_tool",
     "mcp_protocol_status",
     "mcp_advertisement",
+    "mcp_diagnostics",
     "refresh_tool_catalog",
     "batch_call_tools",
 }
@@ -2773,6 +2780,152 @@ def refresh_tool_catalog(args: dict[str, Any]) -> dict[str, Any]:
     else:
         result["catalog_summary"] = {"query": catalog["query"], "count": catalog["count"], "total": catalog["total"]}
     return result
+
+
+def classify_tool_error(err: Exception) -> str:
+    message = str(err).lower()
+    if "unauthorized" in message or "401" in message or "forbidden" in message or "403" in message:
+        return "auth"
+    if "unknown tool" in message:
+        return "tool_not_found"
+    if "dashboard not found" in message or "not found" in message or "404" in message:
+        return "not_found"
+    if "requires force=true" in message or "force_empty" in message:
+        return "guardrail"
+    if "schema" in message or "required" in message or "is required" in message or "expected" in message:
+        return "bad_arguments"
+    if "timeout" in message or "timed out" in message:
+        return "timeout"
+    return "runtime"
+
+
+def tool_lookup_diagnostics(tool_name: str | None) -> dict[str, Any]:
+    if not tool_name:
+        return {}
+    known = tool_name in TOOL_NAMES
+    matches = []
+    if not known:
+        try:
+            matches = search_tools(tool_name, 8).get("matches", [])
+        except Exception:
+            matches = []
+    schema = TOOL_BY_NAME.get(tool_name)
+    return {
+        "requested_tool": tool_name,
+        "known": known,
+        "native_exposed": tool_name in {tool["name"] for tool in native_tools()},
+        "catalog_hash": tool_catalog_fingerprint(),
+        "native_toolset": native_toolset_mode(),
+        "native_tool_count": len(native_tools()),
+        "registered_tool_count": len(TOOLS),
+        "schema": tool_catalog_row(schema, True) if schema else None,
+        "similar_tools": [match.get("name") for match in matches],
+    }
+
+
+def dashboard_resolution_diagnostics(args: dict[str, Any] | None = None) -> dict[str, Any]:
+    args = args or {}
+    registry = load_lovelace_registry()
+    rows = []
+    default_path = storage_path("lovelace")
+    if default_path.exists():
+        rows.append({
+            "id": "lovelace",
+            "url_path": None,
+            "title": "Default Lovelace",
+            "key": "lovelace",
+            "storage_exists": True,
+        })
+    for item in registry.get("data", {}).get("items", []):
+        if not isinstance(item, dict):
+            continue
+        key = dashboard_item_key(item)
+        path = storage_path(key)
+        rows.append({
+            "id": item.get("id"),
+            "url_path": item.get("url_path"),
+            "title": item.get("title"),
+            "key": key,
+            "storage_exists": path.exists(),
+        })
+    wanted = {
+        "id": args.get("id") or args.get("dashboard_id"),
+        "url_path": args.get("url_path"),
+        "key": args.get("key"),
+        "dashboard": args.get("dashboard"),
+    }
+    query = str(next((value for value in wanted.values() if value), "")).lower()
+    candidates = rows
+    if query:
+        candidates = [
+            row for row in rows
+            if any(query in str(row.get(field) or "").lower() for field in ("id", "url_path", "title", "key"))
+        ] or rows[:10]
+    return {
+        "requested": {key: value for key, value in wanted.items() if value},
+        "count": len(rows),
+        "candidates": candidates[:20],
+        "hint": "Use id, url_path, or key from candidates. For active dashboards, prefer live_lovelace_get_config/live_lovelace_find_cards.",
+    }
+
+
+def mcp_diagnostics(args: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": True,
+        "app": {"name": "ha-admin-mcp", "version": APP_VERSION, "endpoint_path": redacted_mcp_path(), "endpoint_path_redacted": True, "port": MCP_PORT},
+        "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
+        "catalog": {
+            "hash": tool_catalog_fingerprint(),
+            "native_toolset": native_toolset_mode(),
+            "native_tool_count": len(native_tools()),
+            "registered_tool_count": len(TOOLS),
+            "upstream_implemented": len(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES),
+            "upstream_missing": sorted(UNIMPLEMENTED_UPSTREAM_TOOL_NAMES),
+        },
+        "recommended_discovery": ["get_target_identity", "mcp_protocol_status", "refresh_tool_catalog", "list_tools", "search_tools"],
+    }
+    if bool(args.get("include_identity")):
+        result["identity"] = get_target_identity()
+    if args.get("tool"):
+        result["tool"] = tool_lookup_diagnostics(str(args["tool"]))
+    if args.get("dashboard"):
+        value = str(args["dashboard"])
+        result["dashboard"] = dashboard_resolution_diagnostics({"id": value, "url_path": value, "key": value, "dashboard": value})
+    if bool(args.get("include_tools")):
+        result["tools"] = list_tools({"limit": 10000, "include_schema": False})
+    return result
+
+
+def structured_tool_error(err: Exception, tool_name: str | None = None, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "tool": tool_name,
+        "category": classify_tool_error(err),
+        "message": redact_secrets(str(err)),
+        "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
+        "catalog_hash": tool_catalog_fingerprint(),
+        "native_toolset": native_toolset_mode(),
+        "native_tool_count": len(native_tools()),
+        "registered_tool_count": len(TOOLS),
+        "diagnostic_tools": ["mcp_diagnostics", "mcp_protocol_status", "refresh_tool_catalog", "list_tools", "search_tools"],
+    }
+    if tool_name:
+        meta["tool_lookup"] = tool_lookup_diagnostics(tool_name)
+    if args and ("lovelace" in str(tool_name or "") or "dashboard" in str(err).lower()):
+        try:
+            meta["dashboard_resolution"] = dashboard_resolution_diagnostics(args)
+        except Exception as diag_err:
+            meta["dashboard_resolution_error"] = redact_secrets(str(diag_err))
+    if meta["category"] == "auth":
+        meta["next_step"] = "Check admin_token/Authorization header and that the client is using the current redacted endpoint path."
+    elif meta["category"] == "tool_not_found":
+        meta["next_step"] = "Call refresh_tool_catalog or list_tools/search_tools, then retry the exact registered tool name."
+    elif meta["category"] == "not_found":
+        meta["next_step"] = "Use the diagnostic candidates to retry with a concrete id/url_path/key, or use live_lovelace_* for active dashboard config."
+    elif meta["category"] == "guardrail":
+        meta["next_step"] = "Retry only with the required force flag after a dry_run/preview confirms the target."
+    else:
+        meta["next_step"] = "Call mcp_diagnostics with the failing tool/dashboard for focused context."
+    return meta
 
 
 def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
@@ -7331,6 +7484,8 @@ def load_lovelace_registry() -> dict[str, Any]:
 
 
 def dashboard_item_key(item: dict[str, Any]) -> str:
+    if item.get("id") == "lovelace" and not item.get("url_path"):
+        return "lovelace"
     return lovelace_dashboard_key(item["id"])
 
 
@@ -7340,6 +7495,12 @@ def resolve_lovelace_dashboard(args: dict[str, Any], allow_missing: bool = False
     wanted_id = args.get("id")
     wanted_url = args.get("url_path")
     wanted_key = args.get("key")
+    if wanted_key == "lovelace" or wanted_id == "lovelace" or wanted_url in ("lovelace", "default", ""):
+        path = storage_path("lovelace")
+        if path.exists():
+            return registry, {"id": "lovelace", "url_path": None, "title": "Default Lovelace", "mode": "storage"}
+        if not allow_missing:
+            return registry, None
     if wanted_key and not wanted_id:
         wanted_id = lovelace_dashboard_id_from_key(wanted_key)
     item = None
@@ -7371,6 +7532,14 @@ def resolve_lovelace_dashboard(args: dict[str, Any], allow_missing: bool = False
 def list_lovelace_dashboards(include_config: bool, max_bytes: int) -> dict[str, Any]:
     registry = load_lovelace_registry()
     rows = []
+    default_path = storage_path("lovelace")
+    if default_path.exists():
+        row: dict[str, Any] = {"item": {"id": "lovelace", "url_path": None, "title": "Default Lovelace", "mode": "storage"}, "key": "lovelace", "storage": path_info(default_path)}
+        if include_config:
+            content, truncated = read_limited(default_path, max_bytes)
+            row["storage"]["content"] = content
+            row["storage"]["truncated"] = truncated
+        rows.append(row)
     for item in registry["data"]["items"]:
         key = dashboard_item_key(item)
         path = storage_path(key)
@@ -7388,7 +7557,8 @@ def list_lovelace_dashboards(include_config: bool, max_bytes: int) -> dict[str, 
 def get_lovelace_dashboard(args: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     registry, item = resolve_lovelace_dashboard(args)
     if item is None:
-        raise ValueError("Dashboard not found")
+        diag = dashboard_resolution_diagnostics(args)
+        raise ValueError(f"Dashboard not found for {diag['requested'] or args}. Use list_lovelace_dashboards or mcp_diagnostics to inspect dashboard ids/url_paths.")
     key = dashboard_item_key(item)
     path = storage_path(key)
     result: dict[str, Any] = {"item": item, "key": key, "path": str(path), "exists": path.exists()}
@@ -7406,7 +7576,8 @@ def get_lovelace_dashboard(args: dict[str, Any], max_bytes: int) -> dict[str, An
 def dashboard_storage(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str, dict[str, Any]]:
     registry, item = resolve_lovelace_dashboard(args)
     if item is None:
-        raise ValueError("Dashboard not found")
+        diag = dashboard_resolution_diagnostics(args)
+        raise ValueError(f"Dashboard not found for {diag['requested'] or args}. Use list_lovelace_dashboards or mcp_diagnostics to inspect dashboard ids/url_paths.")
     key = dashboard_item_key(item)
     storage = load_storage_json(key)
     config = storage.get("data", {}).get("config")
@@ -8226,6 +8397,7 @@ DIRECT_TOOL_HANDLERS = {
     "ha_mcp_get_identity": lambda args: get_target_identity(),
     "mcp_protocol_status": lambda args: mcp_protocol_status(),
     "mcp_advertisement": lambda args: mcp_advertisement(),
+    "mcp_diagnostics": lambda args: mcp_diagnostics(args),
     "refresh_tool_catalog": lambda args: refresh_tool_catalog(args),
     "batch_call_tools": lambda args: batch_call_tools(args),
 }
@@ -8249,9 +8421,10 @@ class AdminDispatchToolAdapter:
                     value = call_tool(inner_self.name, arguments or {})
                     return inner_self.convert_result(value)
                 except Exception as err:
+                    meta = structured_tool_error(err, inner_self.name, arguments or {})
                     return ToolResult(
-                        content=redact_secrets(str(err)),
-                        meta={"tool": inner_self.name},
+                        content=meta["message"],
+                        meta=meta,
                         is_error=True,
                     )
 
@@ -8523,7 +8696,7 @@ class Handler(BaseHTTPRequestHandler):
                     tool_value = call_tool(tool_name, params.get("arguments") or {})
                     result = tool_value if is_mcp_content_result(tool_value) else text_result(tool_value)
                 except Exception as err:
-                    result = tool_error_result(str(err), {"tool": tool_name})
+                    result = tool_error_result(str(err), structured_tool_error(err, tool_name, params.get("arguments") or {}))
             elif method == "ping":
                 result = {}
             elif method == "completion/complete":
