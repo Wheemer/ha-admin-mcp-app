@@ -1732,6 +1732,24 @@ TOOLS = [
         [],
     ),
     tool_schema(
+        "list_lovelace_backups",
+        "List Lovelace dashboard backups created by this MCP add-on under /backup/ha-admin-mcp",
+        {"key": {"type": "string"}, "id": {"type": "string"}, "url_path": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 1000}, "include_hash": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "read_lovelace_backup",
+        "Read one Lovelace dashboard backup created by this MCP add-on",
+        {"path": {"type": "string"}, "name": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}, "include_json": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "restore_lovelace_backup",
+        "Restore one Lovelace dashboard backup created by this MCP add-on. Defaults to the live Lovelace API and requires force=true for writes.",
+        {"path": {"type": "string"}, "name": {"type": "string"}, "key": {"type": "string"}, "id": {"type": "string"}, "url_path": {"type": "string"}, "method": {"type": "string", "enum": ["live", "storage"]}, "backup_current": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean"}, "force_empty": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
         "live_lovelace_get_config",
         "Read the active Lovelace config through the Home Assistant WebSocket API",
         {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}},
@@ -1746,19 +1764,19 @@ TOOLS = [
     tool_schema(
         "live_lovelace_find_cards",
         "Find cards in active Lovelace config through the Home Assistant WebSocket API",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}},
         [],
     ),
     tool_schema(
         "live_lovelace_get_card",
         "Read exactly one card from active Lovelace config through the Home Assistant WebSocket API",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}},
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}},
         [],
     ),
     tool_schema(
         "live_lovelace_patch_card",
         "Patch exactly one card and save through the Home Assistant WebSocket API instead of storage writes. Non-dry-run writes require force=true.",
-        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean", "description": "Required for actual dashboard writes. Omit or false only with dry_run=true.", "default": False}},
+        {"url_path": {"type": "string"}, "dashboard_id": {"type": "string"}, "view_index": {"type": "integer", "minimum": 0}, "view_title": {"type": "string"}, "view_path": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"}, "title": {"type": "string"}, "name": {"type": "string"}, "entity": {"type": "string"}, "card_type": {"type": "string"}, "patch": {"type": "object"}, "replace": {"type": "object"}, "remove_keys": {"type": "array", "items": {"type": "string"}}, "expected_matches": {"type": "integer", "minimum": 1, "maximum": 100}, "backup": {"type": "boolean"}, "verify": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "force": {"type": "boolean", "description": "Required for actual dashboard writes. Omit or false only with dry_run=true.", "default": False}},
         [],
     ),
     tool_schema(
@@ -1816,7 +1834,10 @@ TOOLS = [
             "key": {"type": "string"},
             "view_index": {"type": "integer", "minimum": 0},
             "view_title": {"type": "string"},
+            "view_path": {"type": "string"},
             "query": {"type": "string"},
+            "title": {"type": "string"},
+            "name": {"type": "string"},
             "entity": {"type": "string"},
             "card_type": {"type": "string"},
             "path": {"type": "string"},
@@ -1833,7 +1854,10 @@ TOOLS = [
             "key": {"type": "string"},
             "view_index": {"type": "integer", "minimum": 0},
             "view_title": {"type": "string"},
+            "view_path": {"type": "string"},
             "query": {"type": "string"},
+            "title": {"type": "string"},
+            "name": {"type": "string"},
             "entity": {"type": "string"},
             "card_type": {"type": "string"},
             "path": {"type": "string"},
@@ -1861,6 +1885,7 @@ TOOLS = [
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
             "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
             "expected_hash": {"type": "string"},
         },
         [],
@@ -1883,6 +1908,7 @@ TOOLS = [
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
             "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
             "expected_hash": {"type": "string"},
         },
         ["path"],
@@ -1902,6 +1928,7 @@ TOOLS = [
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
             "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
             "expected_hash": {"type": "string"},
         },
         ["card"],
@@ -1937,6 +1964,8 @@ TOOLS = [
             "key": {"type": "string"},
             "path": {"type": "string"},
             "query": {"type": "string"},
+            "title": {"type": "string"},
+            "name": {"type": "string"},
             "entity": {"type": "string"},
             "card_type": {"type": "string"},
             "view_index": {"type": "integer", "minimum": 0},
@@ -1948,6 +1977,7 @@ TOOLS = [
             "backup": {"type": "boolean"},
             "label": {"type": "string"},
             "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
             "expected_hash": {"type": "string"},
         },
         [],
@@ -1972,6 +2002,8 @@ TOOLS = [
             "label": {"type": "string"},
             "mode": {"type": "string"},
             "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
+            "force_empty": {"type": "boolean"},
             "expected_hash": {"type": "string"},
         },
         [],
@@ -2513,6 +2545,12 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return restore_backup(args)
     if name == "read_lovelace_dashboards":
         return read_lovelace_dashboards(bool(args.get("include_content")), int(args.get("max_bytes") or MAX_READ_BYTES))
+    if name == "list_lovelace_backups":
+        return list_lovelace_backups(args)
+    if name == "read_lovelace_backup":
+        return read_lovelace_backup(args)
+    if name == "restore_lovelace_backup":
+        return restore_lovelace_backup(args)
     if name == "live_lovelace_get_config":
         return live_lovelace_get_config(args)
     if name == "live_lovelace_get_outline":
@@ -4683,6 +4721,7 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "backup": bool(args.get("backup", True)),
             "dry_run": bool(args.get("dry_run")),
             "force": bool(args.get("force")),
+            "force_empty": bool(args.get("force_empty")),
             "expected_hash": args.get("expected_hash"),
         }
         if name == "ha_config_get_dashboard":
@@ -7007,6 +7046,62 @@ def read_lovelace_dashboards(include_content: bool, max_bytes: int) -> dict[str,
     return {"count": len(dashboards), "dashboards": dashboards}
 
 
+def safe_lovelace_backup_path(args: dict[str, Any]) -> Path:
+    value = args.get("path") or args.get("name")
+    if not value:
+        raise ValueError("Pass backup path or name")
+    raw = Path(str(value))
+    path = raw if raw.is_absolute() else DEFAULT_BACKUP_DIR / raw.name
+    resolved = path.resolve()
+    root = DEFAULT_BACKUP_DIR.resolve()
+    if root != resolved and root not in resolved.parents:
+        raise ValueError("Lovelace backup path must be under /backup/ha-admin-mcp")
+    if not resolved.name.startswith("lovelace"):
+        raise ValueError("Only Lovelace dashboard backups can be read or restored by this tool")
+    if not resolved.exists() or not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
+    return resolved
+
+
+def lovelace_backup_prefix(args: dict[str, Any]) -> str:
+    key = args.get("key")
+    if not key and (args.get("id") or args.get("url_path")):
+        _registry, item = resolve_lovelace_dashboard(args)
+        if item:
+            key = dashboard_item_key(item)
+    if not key:
+        return "lovelace"
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(key))
+
+
+def list_lovelace_backups(args: dict[str, Any]) -> dict[str, Any]:
+    limit = int(args.get("limit") or 100)
+    prefix = lovelace_backup_prefix(args)
+    pattern = f"{prefix}-*" if (args.get("key") or args.get("id") or args.get("url_path")) else "lovelace*"
+    rows = []
+    if DEFAULT_BACKUP_DIR.exists():
+        for path in sorted(DEFAULT_BACKUP_DIR.glob(pattern), key=lambda item: item.stat().st_mtime, reverse=True):
+            row = path_info(path) | {"name": path.name}
+            if bool(args.get("include_hash")):
+                row["sha256"] = path_hash(path)
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+    return {"backup_dir": str(DEFAULT_BACKUP_DIR), "pattern": pattern, "count": len(rows), "backups": rows}
+
+
+def read_lovelace_backup(args: dict[str, Any]) -> dict[str, Any]:
+    path = safe_lovelace_backup_path(args)
+    content, truncated = read_limited(path, int(args.get("max_bytes") or MAX_READ_BYTES))
+    result: dict[str, Any] = path_info(path) | {"name": path.name, "content": content, "truncated": truncated}
+    if bool(args.get("include_json", True)):
+        try:
+            result["data"] = json.loads(content)
+        except json.JSONDecodeError as err:
+            result["json_error"] = str(err)
+    return result
+
+
 def lovelace_url_path(args: dict[str, Any]) -> str | None:
     if args.get("url_path") is not None:
         value = str(args["url_path"])
@@ -7069,12 +7164,15 @@ def live_lovelace_find_card_rows(config: dict[str, Any], args: dict[str, Any]) -
         raise ValueError("live Lovelace config does not contain views")
     wanted_view_index = args.get("view_index")
     wanted_view_title = args.get("view_title")
+    wanted_view_path = args.get("view_path")
     limit = int(args.get("limit") or 100)
     matches = []
     for view_index, view in enumerate(views):
         if wanted_view_index is not None and view_index != int(wanted_view_index):
             continue
         if wanted_view_title and (not isinstance(view, dict) or str(view.get("title") or "") != wanted_view_title):
+            continue
+        if wanted_view_path and (not isinstance(view, dict) or str(view.get("path") or "") != wanted_view_path):
             continue
         for row in iter_live_lovelace_view_cards(view, view_index):
             if card_matches(row, args):
@@ -7088,7 +7186,17 @@ def iter_live_lovelace_view_cards(view: Any, view_index: int) -> list[dict[str, 
     view_path = f"$.views[{view_index}]"
     rows = iter_lovelace_cards(view, view_path)
     section_container = re.compile(rf"^{re.escape(view_path)}\.sections\[\d+\]$")
-    return [row for row in rows if row["path"] != view_path and not section_container.match(row["path"])]
+    view_title = view.get("title") if isinstance(view, dict) else None
+    view_url_path = view.get("path") if isinstance(view, dict) else None
+    filtered = []
+    for row in rows:
+        if row["path"] == view_path or section_container.match(row["path"]):
+            continue
+        row["view_index"] = view_index
+        row["view_title"] = view_title
+        row["view_path"] = view_url_path
+        filtered.append(row)
+    return filtered
 
 
 def live_lovelace_get_card(args: dict[str, Any]) -> dict[str, Any]:
@@ -7139,7 +7247,15 @@ def live_lovelace_patch_card(args: dict[str, Any]) -> dict[str, Any]:
         return {"preferred_path": True, "changed": False, "dry_run": True, "path": path, "before": before, "after": after}
     save_args = {"url_path": args.get("url_path"), "dashboard_id": args.get("dashboard_id"), "config": config, "backup": bool(args.get("backup", True)), "force": True}
     saved = live_lovelace_save_config(save_args)
-    return {"preferred_path": True, "changed": True, "path": path, "before": before, "after": after, "save": saved}
+    verify: dict[str, Any] | None = None
+    if bool(args.get("verify", True)):
+        try:
+            verified_config = live_lovelace_config(args)
+            verified_card = value_at_path(verified_config, path)
+            verify = {"ok": verified_card == after, "card": verified_card}
+        except Exception as err:
+            verify = {"ok": False, "error": str(err)}
+    return {"preferred_path": True, "changed": True, "path": path, "before": before, "after": after, "save": saved, "verify": verify}
 
 
 def live_lovelace_save_config(args: dict[str, Any]) -> dict[str, Any]:
@@ -7442,7 +7558,12 @@ def iter_lovelace_cards(value: Any, path: str = "$") -> list[dict[str, Any]]:
 def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
     if args.get("path") and row["path"] != args["path"]:
         return False
+    if args.get("view_path") and str(row.get("view_path") or "") != str(args["view_path"]):
+        return False
     if args.get("card_type") and row.get("type") != args["card_type"]:
+        return False
+    title_filter = str(args.get("title") or args.get("name") or "").lower()
+    if title_filter and title_filter not in str(row.get("title") or "").lower():
         return False
     wanted_entity = str(args.get("entity") or "")
     row_entities = [str(entity) for entity in row.get("entities", [])]
@@ -7454,6 +7575,8 @@ def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
             str(row.get("path") or ""),
             str(row.get("type") or ""),
             str(row.get("title") or ""),
+            str(row.get("view_title") or ""),
+            str(row.get("view_path") or ""),
             " ".join(row_entities),
             json.dumps(row.get("card"), default=str, sort_keys=True),
         ]
@@ -7467,6 +7590,7 @@ def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
     views = dashboard_views(config)
     wanted_view_index = args.get("view_index")
     wanted_view_title = args.get("view_title")
+    wanted_view_path = args.get("view_path")
     limit = int(args.get("limit") or 100)
     matches = []
     for view_index, view in enumerate(views):
@@ -7474,8 +7598,13 @@ def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
             continue
         if wanted_view_title and str(view.get("title") or "") != wanted_view_title:
             continue
+        if wanted_view_path and str(view.get("path") or "") != wanted_view_path:
+            continue
         for row in iter_lovelace_cards(view, f"$.data.config.views[{view_index}]"):
             if card_matches(row, args):
+                row["view_index"] = view_index
+                row["view_title"] = view.get("title") if isinstance(view, dict) else None
+                row["view_path"] = view.get("path") if isinstance(view, dict) else None
                 matches.append(row)
                 if len(matches) >= limit:
                     return {"item": item, "key": key, "count": len(matches), "matches": matches}
@@ -7495,7 +7624,113 @@ def get_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
     return {"item": item, "key": key, "path": target_path, "card": value_at_path(storage, target_path)}
 
 
+def require_lovelace_storage_write_force(args: dict[str, Any], action: str) -> None:
+    if bool(args.get("dry_run")):
+        return
+    if not bool(args.get("force")):
+        raise ValueError(f"{action} uses the storage-backed Lovelace edit path and requires force=true. Prefer live_lovelace_find_cards/live_lovelace_patch_card/live_lovelace_save_config for normal dashboard edits.")
+
+
+def config_views_count(config: Any) -> int:
+    if not isinstance(config, dict):
+        return 0
+    views = config.get("views")
+    return len(views) if isinstance(views, list) else 0
+
+
+def storage_config(storage: Any) -> dict[str, Any]:
+    if isinstance(storage, dict):
+        config = storage.get("data", {}).get("config")
+        if isinstance(config, dict):
+            return config
+    return {}
+
+
+def guard_lovelace_empty_views(args: dict[str, Any], key: str, new_storage: dict[str, Any]) -> None:
+    if bool(args.get("dry_run")):
+        return
+    new_config = storage_config(new_storage)
+    new_views = new_config.get("views")
+    if not isinstance(new_views, list) or new_views:
+        return
+    path = storage_path(key)
+    if not path.exists():
+        return
+    try:
+        current_count = config_views_count(storage_config(load_storage_json(key)))
+    except Exception:
+        current_count = 0
+    if current_count and not bool(args.get("force_empty")):
+        raise ValueError(f"Refusing to replace populated Lovelace dashboard {key} ({current_count} current view(s)) with views: []. Pass force_empty=true only if intentionally clearing the dashboard.")
+
+
+def extract_lovelace_config_from_backup(data: dict[str, Any]) -> tuple[str | None, dict[str, Any], dict[str, Any]]:
+    key = data.get("key") if isinstance(data.get("key"), str) else None
+    config = storage_config(data)
+    if config:
+        return key, config, data
+    if isinstance(data.get("views"), list):
+        key = key or "lovelace"
+        storage = {"version": 1, "minor_version": 1, "key": key, "data": {"config": data}}
+        return key, data, storage
+    raise ValueError("Backup does not contain a Lovelace data.config object or raw config.views list")
+
+
+def dashboard_args_from_key(key: str | None, args: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"id": args.get("id"), "url_path": args.get("url_path"), "dashboard_id": args.get("dashboard_id")}
+    if result.get("id") or result.get("url_path") or result.get("dashboard_id"):
+        return result
+    if not key or key == "lovelace":
+        return result
+    result["dashboard_id"] = lovelace_dashboard_id_from_key(key)
+    return result
+
+
+def restore_lovelace_backup(args: dict[str, Any]) -> dict[str, Any]:
+    if not bool(args.get("dry_run")) and not bool(args.get("force")):
+        raise ValueError("restore_lovelace_backup requires force=true for actual writes")
+    backup = read_lovelace_backup({"path": args.get("path"), "name": args.get("name"), "include_json": True, "max_bytes": args.get("max_bytes") or MAX_READ_BYTES})
+    data = backup.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("Backup is not valid JSON")
+    backup_key, config, storage = extract_lovelace_config_from_backup(data)
+    target_args = dashboard_args_from_key(str(args.get("key") or backup_key or ""), args)
+    method = str(args.get("method") or "live").lower()
+    if config_views_count(config) == 0:
+        try:
+            existing_config = live_lovelace_config(target_args) if method == "live" else storage_config(load_storage_json(str(args.get("key") or backup_key or "lovelace")))
+            existing_count = config_views_count(existing_config)
+        except Exception:
+            existing_count = 0
+        if existing_count and not bool(args.get("force_empty")):
+            raise ValueError(f"Refusing to restore empty Lovelace config over populated dashboard ({existing_count} current view(s)). Pass force_empty=true only if intentionally clearing the dashboard.")
+    if bool(args.get("dry_run")):
+        return {"changed": False, "dry_run": True, "method": method, "backup": backup, "target": target_args, "config": config}
+    if method == "live":
+        saved = live_lovelace_save_config(target_args | {"config": config, "backup": bool(args.get("backup_current", True)), "force": True})
+        return {"changed": True, "method": "live", "backup": {"path": backup.get("path"), "name": backup.get("name")}, "target": target_args, "save": saved}
+    if method != "storage":
+        raise ValueError("method must be live or storage")
+    key = str(args.get("key") or backup_key or "")
+    if not key:
+        registry, item = resolve_lovelace_dashboard(target_args)
+        if item:
+            key = dashboard_item_key(item)
+    if not key:
+        raise ValueError("Could not determine target Lovelace storage key; pass key, id, or url_path")
+    storage["key"] = key
+    guard_lovelace_empty_views(args, key, storage)
+    backups: dict[str, Any] = {}
+    path = storage_path(key)
+    if bool(args.get("backup_current", True)) and path.exists():
+        backups["dashboard"] = backup_path(path, args.get("label") or key)
+    info = dump_storage_json(key, storage)
+    audit_event("restore_lovelace_backup", {"key": key, "backup": backup.get("path"), "method": "storage", "backups": backups})
+    return {"changed": True, "method": "storage", "key": key, "backup": {"path": backup.get("path"), "name": backup.get("name")}, "dashboard": info, "backups": backups, "warning": LOVELACE_STORAGE_EDIT_WARNING}
+
+
 def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    require_lovelace_storage_write_force(args, "patch_lovelace_card")
     if args.get("patch") is None and args.get("replace") is None and not args.get("remove_keys"):
         raise ValueError("Pass patch, replace, or remove_keys")
     item, storage, key, config = dashboard_storage(args)
@@ -7538,6 +7773,8 @@ def patch_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def lovelace_save_mutation(args: dict[str, Any], key: str, storage: dict[str, Any], action: str, details: dict[str, Any]) -> dict[str, Any]:
+    require_lovelace_storage_write_force(args, action)
+    guard_lovelace_empty_views(args, key, storage)
     backups: dict[str, Any] = {}
     if bool(args.get("backup", True)):
         backups["dashboard"] = backup_path(storage_path(key), args.get("label") or key)
@@ -7614,6 +7851,7 @@ def remove_value_at_path(root: Any, path: str) -> Any:
 
 
 def patch_lovelace_json_path(args: dict[str, Any]) -> dict[str, Any]:
+    require_lovelace_storage_write_force(args, "patch_lovelace_json_path")
     item, storage, key, _config = dashboard_storage(args)
     storage_file = storage_path(key)
     require_expected_hash(storage_file, args.get("expected_hash"))
@@ -7665,6 +7903,7 @@ def patch_lovelace_json_path(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def insert_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    require_lovelace_storage_write_force(args, "insert_lovelace_card")
     item, storage, key, config = dashboard_storage(args)
     storage_file = storage_path(key)
     require_expected_hash(storage_file, args.get("expected_hash"))
@@ -7717,6 +7956,7 @@ def delete_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def move_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
+    require_lovelace_storage_write_force(args, "move_lovelace_card")
     item, storage, key, source_path, card = matched_card_path(args)
     storage_file = storage_path(key)
     require_expected_hash(storage_file, args.get("expected_hash"))
@@ -7759,6 +7999,7 @@ def lovelace_storage_path(key: str) -> Path:
 
 
 def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
+    require_lovelace_storage_write_force(args, "save_lovelace_dashboard")
     if args.get("key") and not any(args.get(name) is not None for name in ("id", "url_path", "title", "config", "views")):
         path = lovelace_storage_path(args["key"])
         require_expected_hash(path, args.get("expected_hash"))
@@ -7802,6 +8043,7 @@ def save_lovelace_dashboard(args: dict[str, Any]) -> dict[str, Any]:
             config["views"] = args["views"]
         dashboard_storage = {"version": 1, "minor_version": 1, "key": key, "data": {"config": config}}
     dashboard_storage["key"] = key
+    guard_lovelace_empty_views(args, key, dashboard_storage)
     if bool(args.get("dry_run")):
         return {"item": item, "key": key, "dry_run": True, "warning": LOVELACE_STORAGE_EDIT_WARNING, "current_hash": path_hash(path), "would_backup": bool(args.get("backup", True)), "dashboard_storage": dashboard_storage}
     backups: dict[str, Any] = {}
