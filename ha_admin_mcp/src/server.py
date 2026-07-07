@@ -86,6 +86,28 @@ REGISTRY_DEFINITIONS = {
 REGISTRY_KEY_ALIASES = {
     definition["key"]: name for name, definition in REGISTRY_DEFINITIONS.items()
 }
+UPSTREAM_STRING_SCHEMA_FIELDS = {
+    "area_id",
+    "calendar_entity_id",
+    "category_id",
+    "device_id",
+    "domain",
+    "entity_id",
+    "entry_id",
+    "floor_id",
+    "helper_id",
+    "helper_type",
+    "id",
+    "identifier",
+    "label_id",
+    "path",
+    "resource_id",
+    "slug",
+    "subentry_id",
+    "subentry_type",
+    "target",
+    "url",
+}
 
 
 def read_app_version() -> str:
@@ -702,8 +724,47 @@ def load_upstream_tool_metadata() -> dict[str, dict[str, Any]]:
     metadata = {}
     for item in items:
         if isinstance(item, dict) and isinstance(item.get("name"), str):
-            metadata[item["name"]] = item
+            metadata[item["name"]] = normalize_upstream_tool_schema(item)
     return metadata
+
+
+def normalize_upstream_tool_schema(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(item))
+    schema = normalized.get("inputSchema")
+    if not isinstance(schema, dict):
+        return normalized
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return normalized
+    for name, prop in properties.items():
+        if not isinstance(prop, dict):
+            continue
+        if name in UPSTREAM_STRING_SCHEMA_FIELDS and prop.get("type") in {"integer", "number", "boolean"}:
+            prop["type"] = "string"
+            prop["x-ha-admin-mcp-normalized-type"] = True
+    tool_name = str(normalized.get("name") or "")
+    if tool_name == "ha_write_file":
+        properties.setdefault("content_base64", {"type": "string", "description": "Base64-encoded file payload for bundles or binary-safe writes."})
+        properties.setdefault("backup", {"type": "boolean", "description": "Back up the existing file before overwriting.", "default": True})
+        properties.setdefault("dry_run", {"type": "boolean"})
+        properties.setdefault("expected_hash", {"type": "string", "description": "Optional precondition sha256 of the current target file."})
+        properties.setdefault("verify_resource", {"type": "boolean", "description": "When writing under /config/www, also verify the matching Lovelace served resource."})
+        properties.setdefault("resource_url", {"type": "string", "description": "Optional Lovelace resource URL to verify after write."})
+        properties.setdefault("ha_url", {"type": "string", "description": "Optional Home Assistant base URL for served resource fetch verification."})
+        schema["required"] = ["path"]
+        normalized["description"] = normalized.get("description", "") + "\n\nHA Admin MCP extension: accepts content_base64 for binary-safe bundle uploads and can return resource verification metadata."
+    elif tool_name == "ha_list_files":
+        properties.setdefault("filename", {"type": "string"})
+        properties.setdefault("recursive", {"type": "boolean"})
+        properties.setdefault("sort", {"type": "string", "enum": ["name", "modified", "size"]})
+        properties.setdefault("descending", {"type": "boolean"})
+        properties.setdefault("newest_only", {"type": "boolean"})
+        properties.setdefault("include_hash", {"type": "boolean"})
+        properties.setdefault("limit", {"type": "integer", "minimum": 1, "maximum": 10000})
+    elif tool_name == "ha_read_file":
+        properties.setdefault("max_bytes", {"type": "integer", "minimum": 1, "maximum": 100000000})
+        properties.setdefault("base64", {"type": "boolean", "description": "Return content_base64 instead of text content."})
+    return normalized
 
 
 UPSTREAM_TOOL_METADATA = load_upstream_tool_metadata()
@@ -854,6 +915,12 @@ TOOLS = [
         "mcp_diagnostics",
         "Return target identity, catalog fingerprint, native exposure counts, and optional focused tool/dashboard diagnostics",
         {"tool": {"type": "string"}, "dashboard": {"type": "string"}, "include_tools": {"type": "boolean"}, "include_identity": {"type": "boolean"}},
+        [],
+    ),
+    tool_schema(
+        "ha_mcp_core_tools",
+        "Return a stable category index for common HA admin tools so clients do not depend on fragile search wording",
+        {"category": {"type": "string"}, "include_schema": {"type": "boolean"}},
         [],
     ),
     tool_schema(
@@ -2136,6 +2203,20 @@ TOOL_BY_NAME = {tool["name"]: tool for tool in TOOLS}
 TOOL_NAMES = frozenset(TOOL_BY_NAME)
 IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAME_SET = frozenset(IMPLEMENTED_UPSTREAM_HA_MCP_TOOL_NAMES)
 HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET = frozenset(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAMES)
+CORE_ADMIN_TOOL_CATEGORIES = {
+    "identity": ["get_target_identity", "ha_mcp_get_identity", "ha_mcp_status", "mcp_diagnostics", "mcp_protocol_status", "mcp_advertisement", "refresh_tool_catalog"],
+    "discovery": ["ha_mcp_core_tools", "list_tools", "search_tools", "ha_search_tools", "call_tool", "mcp_call_tool", "ha_mcp_call_tool", "batch_call_tools"],
+    "files": ["stat_path", "list_dir", "list_config_files", "ha_list_files", "read_file", "read_file_base64", "read_config_file", "ha_read_file", "write_file", "write_file_base64", "write_config_file", "ha_write_file", "hash_file", "search_files", "glob_paths"],
+    "lovelace": ["live_lovelace_resources", "list_lovelace_resources", "ha_config_list_dashboard_resources", "set_lovelace_resource", "ha_config_set_dashboard_resource", "verify_custom_card_resource", "deploy_custom_card_bundle", "live_lovelace_find_cards", "live_lovelace_patch_card", "save_lovelace_dashboard", "restore_lovelace_backup"],
+    "dashboards": ["list_lovelace_dashboards", "ha_config_get_dashboard", "get_lovelace_dashboard", "get_lovelace_dashboard_outline", "live_lovelace_get_config", "live_lovelace_get_outline", "ha_get_dashboard_screenshot"],
+    "entities": ["get_state", "ha_get_state", "list_entities", "ha_search", "ha_get_entity", "ha_set_entity", "ha_search_entities", "get_history", "ha_get_history"],
+    "services": ["get_services", "ha_list_services", "call_service", "ha_call_service", "fire_event", "ha_fire_event"],
+    "config_entries": ["search_config_entries", "get_config_entry", "patch_config_entry", "ha_get_integration", "ha_set_integration_enabled"],
+    "addons": ["app_info", "addon_info", "app_logs", "addon_logs", "app_control", "addon_control", "addon_options", "ha_get_addon", "ha_manage_addon", "supervisor_api", "store_info"],
+    "logs": ["get_error_log", "ha_get_logs", "tail_log", "app_logs", "addon_logs"],
+    "backups": ["list_backups", "create_backup", "get_backup_info", "delete_backup", "restore_backup", "list_lovelace_backups", "read_lovelace_backup", "restore_lovelace_backup", "backup_path"],
+    "automations": ["list_automation_configs", "get_automation_config", "get_automation", "patch_automation", "automation_diagnostics", "list_traces", "get_trace", "test_automation_trace", "ha_config_get_automation", "ha_config_set_automation"],
+}
 
 
 BOOTSTRAP_NATIVE_TOOL_NAMES = {
@@ -2152,6 +2233,7 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
     "mcp_protocol_status",
     "mcp_advertisement",
     "mcp_diagnostics",
+    "ha_mcp_core_tools",
     "refresh_tool_catalog",
     "batch_call_tools",
 }
@@ -2790,6 +2872,30 @@ def list_tools(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def ha_mcp_core_tools(args: dict[str, Any]) -> dict[str, Any]:
+    requested = str(args.get("category") or "").lower().strip()
+    include_schema = bool(args.get("include_schema"))
+    categories: dict[str, Any] = {}
+    for category, names in CORE_ADMIN_TOOL_CATEGORIES.items():
+        if requested and requested != category:
+            continue
+        available = [name for name in names if name in TOOL_BY_NAME]
+        categories[category] = {
+            "count": len(available),
+            "tools": [tool_catalog_row(TOOL_BY_NAME[name], include_schema) for name in available],
+        }
+    return {
+        "success": True,
+        "target": {"label": OPTIONS.get("target_label") or "", "host_hint": OPTIONS.get("target_host_hint") or ""},
+        "catalog_hash": tool_catalog_fingerprint(),
+        "native_toolset": native_toolset_mode(),
+        "native_tool_count": len(native_tools()),
+        "registered_tool_count": len(TOOLS),
+        "categories": categories,
+        "category_names": sorted(CORE_ADMIN_TOOL_CATEGORIES),
+    }
+
+
 def search_tools(args: dict[str, Any] | str, limit: int | None = None, include_schema: bool = False) -> dict[str, Any]:
     payload = {"query": args} if isinstance(args, str) else dict(args or {})
     if payload.get("query") in (None, "") and isinstance(payload.get("filter"), dict):
@@ -2835,8 +2941,16 @@ def classify_tool_error(err: Exception) -> str:
     message = str(err).lower()
     if "unauthorized" in message or "401" in message or "forbidden" in message or "403" in message:
         return "auth"
+    if "502" in message or "bad gateway" in message:
+        return "upstream_gateway"
+    if "websocket handshake" in message or "websocket closed" in message or "auth_required" in message or "auth_ok" in message:
+        return "ha_websocket"
+    if "supervisor_token" in message or "hassio_token" in message:
+        return "addon_environment"
     if "unknown tool" in message:
         return "tool_not_found"
+    if "outside" in message or "escapes /config" in message or "absolute config paths must stay under" in message or "path traversal" in message:
+        return "path_policy"
     if "dashboard not found" in message or "not found" in message or "404" in message:
         return "not_found"
     if "requires force=true" in message or "force_empty" in message:
@@ -2846,6 +2960,21 @@ def classify_tool_error(err: Exception) -> str:
     if "timeout" in message or "timed out" in message:
         return "timeout"
     return "runtime"
+
+
+def error_retry_hint(category: str) -> str:
+    return {
+        "auth": "Do not retry unchanged; check admin_token/bearer token and the MCP URL.",
+        "upstream_gateway": "Usually transient while HA/add-on/proxy is restarting; retry once after a short delay, then check add-on/Core logs.",
+        "ha_websocket": "Check Home Assistant Core WebSocket availability, Supervisor token, and whether Core restarted during the call.",
+        "addon_environment": "The add-on runtime is missing expected Supervisor/Home Assistant environment; inspect add-on startup logs.",
+        "tool_not_found": "Refresh/list the tool catalog and check native_toolset exposure.",
+        "path_policy": "Adjust the path to an allowed mapped root or use a /config-relative path.",
+        "not_found": "Verify the dashboard/entity/file/resource identifier with a list/search tool before retrying.",
+        "guardrail": "Retry only if the caller intentionally supplies the required force/confirm flag.",
+        "bad_arguments": "Fix arguments according to the returned schema before retrying.",
+        "timeout": "Retry with a narrower query or a larger timeout if the tool supports it.",
+    }.get(category, "Check the diagnostic_tools list in this error response before retrying.")
 
 
 def tool_lookup_diagnostics(tool_name: str | None) -> dict[str, Any]:
@@ -2965,6 +3094,7 @@ def structured_tool_error(err: Exception, tool_name: str | None = None, args: di
         "native_tool_count": len(native_tools()),
         "registered_tool_count": len(TOOLS),
         "diagnostic_tools": ["mcp_diagnostics", "mcp_protocol_status", "refresh_tool_catalog", "list_tools", "search_tools"],
+        "retry_hint": error_retry_hint(classify_tool_error(err)),
     }
     if actual_tool:
         meta["tool_lookup"] = tool_lookup_diagnostics(actual_tool)
@@ -4886,19 +5016,50 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
     if name in ("ha_list_files", "ha_read_file", "ha_write_file", "ha_delete_file"):
         path = args.get("path") or "."
         if name == "ha_list_files":
-            return list_config_files({"path": path, "recursive": bool(args.get("recursive")), "limit": int(args.get("limit") or 500)})
-        if name == "ha_read_file":
-            content, truncated = read_limited(config_path(path), int(args.get("max_bytes") or MAX_READ_BYTES))
-            return {"path": path, "content": content, "truncated": truncated}
-        if name == "ha_write_file":
-            return write_config_file({
+            return list_config_files({
                 "path": path,
-                "content": args.get("content") or "",
-                "backup": bool(args.get("backup", True)),
-                "check_config": bool(args.get("check_config", False)),
-                "dry_run": bool(args.get("dry_run")),
-                "expected_hash": args.get("expected_hash"),
+                "pattern": args.get("pattern"),
+                "filename": args.get("filename"),
+                "recursive": bool(args.get("recursive")),
+                "sort": args.get("sort"),
+                "descending": bool(args.get("descending")),
+                "newest_only": bool(args.get("newest_only")),
+                "include_hash": bool(args.get("include_hash")),
+                "limit": int(args.get("limit") or 500),
             })
+        if name == "ha_read_file":
+            target = config_path(path)
+            if bool(args.get("base64")):
+                data, truncated = read_bytes_limited(target, int(args.get("max_bytes") or MAX_READ_BYTES))
+                return {"path": str(target), "content_base64": base64.b64encode(data).decode(), "truncated": truncated, "allowed_roots": visible_roots_summary(config_only=True)}
+            content, truncated = read_limited(target, int(args.get("max_bytes") or MAX_READ_BYTES))
+            return {"path": str(target), "content": content, "truncated": truncated, "allowed_roots": visible_roots_summary(config_only=True)}
+        if name == "ha_write_file":
+            if args.get("content_base64") is not None:
+                result = write_visible_file({
+                    "path": path,
+                    "content_base64": args.get("content_base64"),
+                    "mode": args.get("mode"),
+                    "dry_run": bool(args.get("dry_run")),
+                    "expected_hash": args.get("expected_hash"),
+                }, binary=True)
+            else:
+                result = write_config_file({
+                    "path": path,
+                    "content": args.get("content") or "",
+                    "backup": bool(args.get("backup", True)),
+                    "check_config": bool(args.get("check_config", False)),
+                    "dry_run": bool(args.get("dry_run")),
+                    "expected_hash": args.get("expected_hash"),
+                })
+            if bool(args.get("verify_resource")) and not bool(args.get("dry_run")):
+                resource_args = {"path": result.get("path") or path, "url": args.get("resource_url"), "ha_url": args.get("ha_url"), "fetch_served": bool(args.get("fetch_served"))}
+                try:
+                    result["resource_verification"] = verify_custom_card_resource(resource_args)
+                except Exception as err:
+                    category = classify_tool_error(err)
+                    result["resource_verification"] = {"success": False, "category": category, "error": redact_secrets(str(err)), "retry_hint": error_retry_hint(category)}
+            return result
         target = config_path(path)
         require_force_for_path(target, args, "ha_delete_file")
         if bool(args.get("dry_run")):
@@ -5588,6 +5749,9 @@ def verify_custom_card_resource(args: dict[str, Any]) -> dict[str, Any]:
     resources = list_lovelace_resources()["resources"]
     resource = None
     url = args.get("url")
+    path = config_path(args["path"]) if args.get("path") else None
+    if path and not url:
+        url = resource_url_from_custom_card_path(path)
     if args.get("resource_id") or url:
         resource = find_lovelace_resource_loose(resources, args.get("resource_id"), str(url) if url else None)
     if not resource and args.get("resource_query"):
@@ -5595,7 +5759,7 @@ def verify_custom_card_resource(args: dict[str, Any]) -> dict[str, Any]:
         resource = next((item for item in resources if query in str(item.get("url") or "").lower()), None)
     if resource and not url:
         url = resource.get("url")
-    path = config_path(args["path"]) if args.get("path") else custom_card_path_from_resource_url(str(url or ""))
+    path = path or custom_card_path_from_resource_url(str(url or ""))
     file_result = file_proof(path) if path else {"exists": False, "error": "Resource URL is not /hacsfiles/... or /local/...; pass path explicitly"}
     gzip_path = Path(str(path) + ".gz") if path else None
     gzip_result = file_proof(gzip_path) if gzip_path else {"exists": False}
@@ -5776,7 +5940,7 @@ def write_visible_file(args: dict[str, Any], binary: bool = False) -> dict[str, 
     require_expected_hash(path, args.get("expected_hash"))
     data = base64.b64decode(args["content_base64"]) if binary else args["content"].encode()
     if bool(args.get("dry_run")):
-        return {"path": str(path), "dry_run": True, "would_write_bytes": len(data), "current_hash": path_hash(path)}
+        return {"path": str(path), "dry_run": True, "would_write_bytes": len(data), "current_hash": path_hash(path), "allowed_roots": visible_roots_summary()}
     path.parent.mkdir(parents=True, exist_ok=True)
     if binary:
         path.write_bytes(data)
@@ -5785,7 +5949,7 @@ def write_visible_file(args: dict[str, Any], binary: bool = False) -> dict[str, 
     if args.get("mode"):
         path.chmod(int(str(args["mode"]), 8))
     audit_event("write_file_base64" if binary else "write_file", {"path": str(path), "bytes": len(data)})
-    return path_info(path)
+    return path_info(path) | {"sha256": path_hash(path), "allowed_roots": visible_roots_summary()}
 
 
 def delete_visible_path(args: dict[str, Any]) -> dict[str, Any]:
@@ -6004,6 +6168,22 @@ def config_path(path: str) -> Path:
     return target
 
 
+def visible_roots_summary(*, config_only: bool = False) -> dict[str, Any]:
+    roots = [CONFIG_ROOT] if config_only else [CONFIG_ROOT, Path("/backup"), Path("/share"), Path("/ssl"), Path("/addons"), Path("/data")]
+    rows = []
+    for root in roots:
+        try:
+            rows.append({"path": str(root), "exists": root.exists(), "writable": os.access(root, os.W_OK)})
+        except OSError as err:
+            rows.append({"path": str(root), "error": str(err)})
+    return {
+        "default_relative_root": str(CONFIG_ROOT),
+        "config_path_policy": "Relative paths resolve under /config; /config absolute paths are accepted by config tools.",
+        "visible_path_policy": "Privileged visible-path tools resolve relative paths under /config and can access mapped add-on roots.",
+        "roots": rows,
+    }
+
+
 def list_config_files(args: dict[str, Any]) -> dict[str, Any]:
     root = config_path(args.get("path") or ".")
     pattern = args.get("filename") or args.get("pattern") or "*"
@@ -6018,7 +6198,7 @@ def list_config_files(args: dict[str, Any]) -> dict[str, Any]:
             rows.append({"path": str(path), "error": str(err)})
     total = len(rows)
     rows = sort_and_limit_file_rows(rows, args, limit, include_hash=bool(args.get("include_hash")))
-    return {"root": str(root), "pattern": pattern, "count": len(rows), "total_matches": total, "truncated": total > len(rows), "files": rows}
+    return {"root": str(root), "pattern": pattern, "count": len(rows), "total_matches": total, "truncated": total > len(rows), "allowed_roots": visible_roots_summary(config_only=True), "files": rows}
 
 
 def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
@@ -6031,6 +6211,7 @@ def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
             "dry_run": True,
             "would_write_bytes": len(args["content"].encode()),
             "current_hash": path_hash(path),
+            "allowed_roots": visible_roots_summary(config_only=True),
             "would_backup": bool(path.exists() and args.get("backup", True)),
             "would_check_config": bool(args.get("check_config", False)),
         }
@@ -6041,7 +6222,7 @@ def write_config_file(args: dict[str, Any]) -> dict[str, Any]:
     path.write_text(args["content"])
     if args.get("mode"):
         path.chmod(int(str(args["mode"]), 8))
-    result: dict[str, Any] = path_info(path) | {"relative_path": args["path"], "backup": backup}
+    result: dict[str, Any] = path_info(path) | {"relative_path": args["path"], "backup": backup, "sha256": path_hash(path), "allowed_roots": visible_roots_summary(config_only=True)}
     if bool(args.get("check_config", False)):
         result["check_config"] = supervisor_request("POST", "/core/check")
     audit_event("write_config_file", {"path": str(path), "backup": backup, "check_config": bool(args.get("check_config", False))})
@@ -8672,6 +8853,7 @@ DIRECT_TOOL_HANDLERS = {
     "mcp_protocol_status": lambda args: mcp_protocol_status(),
     "mcp_advertisement": lambda args: mcp_advertisement(),
     "mcp_diagnostics": lambda args: mcp_diagnostics(args),
+    "ha_mcp_core_tools": lambda args: ha_mcp_core_tools(args),
     "refresh_tool_catalog": lambda args: refresh_tool_catalog(args),
     "batch_call_tools": lambda args: batch_call_tools(args),
 }
