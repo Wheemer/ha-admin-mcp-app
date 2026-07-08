@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import fnmatch
 import ast
 import base64
@@ -1337,8 +1338,31 @@ TOOLS = [
     tool_schema("list_template_configs", "Find template configuration blocks in templates.yaml, configuration.yaml, and package YAML", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("get_template_config", "Get template source context by entity_id, unique text, or query", {"entity_id": {"type": "string"}, "query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("list_blueprints", "List blueprint YAML files under /config/blueprints", {"domain": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}}, []),
-    tool_schema("read_blueprint", "Read one blueprint YAML file by relative path or domain/name", {"path": {"type": "string"}, "domain": {"type": "string"}, "name": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}}, []),
+    tool_schema("read_blueprint", "Read one blueprint YAML file by relative path or domain/name with hash metadata", {"path": {"type": "string"}, "domain": {"type": "string"}, "name": {"type": "string"}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 100000000}}, []),
     tool_schema("search_blueprints", "Search blueprint YAML files under /config/blueprints", {"query": {"type": "string"}, "domain": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 10000}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 50}}, ["query"]),
+    tool_schema(
+        "patch_blueprint",
+        "Safely patch one local YAML blueprint under /config/blueprints with hash guard, external backup, config check, rollback, and optional automation reload",
+        {
+            "path": {"type": "string"},
+            "domain": {"type": "string"},
+            "name": {"type": "string"},
+            "content": {"type": "string", "description": "Full replacement content. Use search/replace for surgical edits."},
+            "search": {"type": "string"},
+            "replace": {"type": "string"},
+            "regex": {"type": "boolean"},
+            "count": {"type": "integer", "minimum": 0},
+            "expected_count": {"type": "integer", "minimum": 0},
+            "max_changed": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "expected_hash": {"type": "string"},
+            "backup": {"type": "boolean"},
+            "check_config": {"type": "boolean"},
+            "reload_automations": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "force": {"type": "boolean"},
+        },
+        [],
+    ),
     tool_schema("get_recorder_config", "Find recorder config source context and return recorder DB info", {"query": {"type": "string"}, "context_lines": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     tool_schema("write_recorder_package", "Write a dedicated /config/packages recorder YAML file with dry-run, backup, and config check", {"filename": {"type": "string"}, "config": {"type": "object"}, "content": {"type": "string"}, "backup": {"type": "boolean"}, "dry_run": {"type": "boolean"}, "expected_hash": {"type": "string"}, "check_config": {"type": "boolean"}, "force": {"type": "boolean"}}, []),
     tool_schema(
@@ -2283,7 +2307,7 @@ CORE_ADMIN_TOOL_CATEGORIES = {
     "addons": ["app_info", "addon_info", "app_logs", "addon_logs", "app_control", "addon_control", "addon_options", "ha_get_addon", "ha_manage_addon", "supervisor_api", "store_info"],
     "logs": ["get_error_log", "ha_get_logs", "tail_log", "app_logs", "addon_logs"],
     "backups": ["list_backups", "create_backup", "get_backup_info", "delete_backup", "restore_backup", "list_lovelace_backups", "read_lovelace_backup", "restore_lovelace_backup", "backup_path"],
-    "automations": ["list_automation_configs", "get_automation_config", "get_automation", "patch_automation", "automation_diagnostics", "list_traces", "get_trace", "test_automation_trace", "ha_config_get_automation", "ha_config_set_automation"],
+    "automations": ["list_automation_configs", "get_automation_config", "get_automation", "patch_automation", "list_blueprints", "read_blueprint", "search_blueprints", "patch_blueprint", "automation_diagnostics", "list_traces", "get_trace", "test_automation_trace", "ha_config_get_automation", "ha_config_set_automation"],
 }
 
 
@@ -2589,6 +2613,8 @@ def call_tool(name: str, args: dict[str, Any]) -> Any:
         return read_blueprint(args)
     if name == "search_blueprints":
         return search_blueprints(args)
+    if name == "patch_blueprint":
+        return patch_blueprint(args)
     if name == "get_recorder_config":
         return get_recorder_config(args)
     if name == "write_recorder_package":
@@ -4012,10 +4038,95 @@ def resolve_blueprint_path(args: dict[str, Any]) -> Path:
     return config_path(candidates[0]["relative_path"])
 
 
+def require_blueprint_file(path: Path) -> Path:
+    root = blueprint_root().resolve()
+    target = path.resolve()
+    if target == root or root not in target.parents:
+        raise ValueError("Blueprint edits must stay under /config/blueprints")
+    if target.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("Blueprint path must be a .yaml or .yml file")
+    return target
+
+
 def read_blueprint(args: dict[str, Any]) -> dict[str, Any]:
-    path = resolve_blueprint_path(args)
+    path = require_blueprint_file(resolve_blueprint_path(args))
     content, truncated = read_limited(path, int(args.get("max_bytes") or MAX_READ_BYTES))
-    return {"path": str(path), "relative_path": str(path.relative_to(CONFIG_ROOT)), "content": content, "truncated": truncated}
+    return {"path": str(path), "relative_path": str(path.relative_to(CONFIG_ROOT)), "sha256": path_hash(path), "content": content, "truncated": truncated}
+
+
+def blueprint_patch_preview(before: str, after: str, max_lines: int = 120) -> dict[str, Any]:
+    diff = list(difflib.unified_diff(before.splitlines(), after.splitlines(), fromfile="before", tofile="after", lineterm=""))
+    truncated = len(diff) > max_lines
+    return {"diff": diff[:max_lines], "truncated": truncated, "line_count": len(diff)}
+
+
+def patch_blueprint(args: dict[str, Any]) -> dict[str, Any]:
+    path = require_blueprint_file(resolve_blueprint_path(args))
+    if not path.exists():
+        raise ValueError(f"Blueprint file does not exist: {path}")
+    before = path.read_text(encoding="utf-8", errors="replace")
+    before_hash = path_hash(path)
+    if args.get("expected_hash") and str(args["expected_hash"]).lower() != str(before_hash).lower():
+        raise ValueError(f"expected_hash mismatch for {path}: expected {args['expected_hash']}, actual {before_hash}")
+    if args.get("content") is not None:
+        after = str(args["content"])
+        changed_count = 1 if after != before else 0
+        operation = "replace_content"
+        if not bool(args.get("force")) and len(after) < max(1, len(before) // 4):
+            raise ValueError("Refusing broad blueprint content replacement that shrinks the file by more than 75% without force=true")
+    else:
+        if args.get("search") is None:
+            raise ValueError("Pass content for full replacement, or search and replace for a surgical blueprint edit")
+        search = str(args["search"])
+        replace = str(args.get("replace") or "")
+        count = int(args.get("count") if args.get("count") is not None else 0)
+        if bool(args.get("regex")):
+            after, changed_count = re.subn(search, replace, before, count=count)
+            operation = "regex_replace"
+        else:
+            changed_count = before.count(search) if count == 0 else min(before.count(search), count)
+            after = before.replace(search, replace) if count == 0 else before.replace(search, replace, count)
+            operation = "text_replace"
+    expected_count = args.get("expected_count")
+    if expected_count is not None and changed_count != int(expected_count):
+        raise ValueError(f"expected_count mismatch for {path}: expected {expected_count}, actual {changed_count}")
+    max_changed = int(args.get("max_changed") or 20)
+    if changed_count > max_changed and not bool(args.get("force")):
+        raise ValueError(f"Refusing broad blueprint edit with {changed_count} replacements; pass force=true or a tighter search")
+    after_hash = hashlib.sha256(after.encode()).hexdigest()
+    preview = blueprint_patch_preview(before, after)
+    base_result: dict[str, Any] = {
+        "path": str(path),
+        "relative_path": str(path.relative_to(CONFIG_ROOT)),
+        "operation": operation,
+        "changed": before != after,
+        "changed_count": changed_count,
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+        "preview": preview,
+    }
+    if bool(args.get("dry_run")):
+        return base_result | {"dry_run": True, "would_backup": bool(args.get("backup", True)), "would_check_config": bool(args.get("check_config", True)), "would_reload_automations": bool(args.get("reload_automations"))}
+    if before == after:
+        return base_result | {"dry_run": False, "message": "No changes needed"}
+    backup = backup_path(path, args.get("label") or path.name) if bool(args.get("backup", True)) else None
+    path.write_text(after, encoding="utf-8")
+    result = base_result | {"backup": backup, "dry_run": False}
+    try:
+        if bool(args.get("check_config", True)):
+            result["check_config"] = run_config_check()
+            ensure_config_check_valid(result["check_config"])
+        if bool(args.get("reload_automations")):
+            result["reload_automations"] = ha_request("POST", "/services/automation/reload", {})
+    except Exception as err:
+        path.write_text(before, encoding="utf-8")
+        result["rolled_back"] = True
+        result["rollback_hash"] = path_hash(path)
+        result["error"] = structured_tool_error(err, "patch_blueprint", args)
+        audit_event("patch_blueprint.rollback", {"path": str(path), "backup": backup, "error": str(err)})
+        return result
+    audit_event("patch_blueprint", {"path": str(path), "changed_count": changed_count, "backup": backup, "check_config": bool(args.get("check_config", True)), "reload_automations": bool(args.get("reload_automations"))})
+    return result
 
 
 def search_blueprints(args: dict[str, Any]) -> dict[str, Any]:
@@ -6716,6 +6827,14 @@ def check_reload_readiness() -> dict[str, Any]:
             if service.startswith("reload"):
                 reloads.append({"domain": domain_name, "service": service})
     return {"check_config": check, "reload_services": reloads}
+
+
+def ensure_config_check_valid(check: Any) -> None:
+    if isinstance(check, dict):
+        payload = check.get("data") if isinstance(check.get("data"), dict) else check
+        text = json.dumps(payload, default=str).lower()
+        if payload.get("result") in {"invalid", "error"} or payload.get("valid") is False or payload.get("errors") or '"invalid"' in text:
+            raise RuntimeError(f"Home Assistant config check failed: {redact_secrets(json.dumps(payload, default=str)[:4000])}")
 
 
 def run_config_check(retries: int = 3, delay: float = 2.0) -> Any:
