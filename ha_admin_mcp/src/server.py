@@ -363,7 +363,6 @@ def app_server_info(headers: Any | None = None) -> dict[str, Any]:
         "description": f"Privileged Home Assistant administration MCP add-on for {advertised_target_label()}",
         "icons": [
             {"src": f"{base}/icon.png", "mimeType": "image/png", "sizes": ["512x512"]},
-            {"src": f"{base}/logo.png", "mimeType": "image/png", "sizes": ["512x512"]},
             {"src": f"{base}/icon.svg", "mimeType": "image/svg+xml"},
         ],
         "websiteUrl": "https://github.com/Wheemer/ha-admin-mcp-app",
@@ -9352,7 +9351,6 @@ def build_fastmcp_server():
         instructions=mcp_instructions(),
         icons=[
             Icon(src=f"http://{advertised_target_hint() or '127.0.0.1'}:{MCP_PORT}/icon.png", mimeType="image/png", sizes=["512x512"]),
-            Icon(src=f"http://{advertised_target_hint() or '127.0.0.1'}:{MCP_PORT}/logo.png", mimeType="image/png", sizes=["512x512"]),
             Icon(src=f"http://{advertised_target_hint() or '127.0.0.1'}:{MCP_PORT}/icon.svg", mimeType="image/svg+xml"),
         ],
     )
@@ -9370,7 +9368,7 @@ def build_fastmcp_server():
 
     @mcp.custom_route("/logo.png", methods=["GET"])
     async def _logo_png(_request):
-        return FileResponse(APP_ROOT / "logo.png", media_type="image/png")
+        return FileResponse(APP_ROOT / "icon.png", media_type="image/png")
 
     @mcp.custom_route("/icon.svg", methods=["GET"])
     async def _icon_svg(_request):
@@ -9378,7 +9376,7 @@ def build_fastmcp_server():
 
     @mcp.custom_route("/logo.svg", methods=["GET"])
     async def _logo_svg(_request):
-        return FileResponse(APP_ROOT / "logo.svg", media_type="image/svg+xml")
+        return FileResponse(APP_ROOT / "icon.svg", media_type="image/svg+xml")
 
     @mcp.custom_route(MCP_PATH, methods=["GET"])
     async def _mcp_get(_request):
@@ -9427,7 +9425,8 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json({"ok": True, "dangerous": True})
             return
         if self.path in {"/icon.png", "/logo.png", "/icon.svg", "/logo.svg"}:
-            self.write_asset(APP_ROOT / self.path.lstrip("/"))
+            asset_name = "icon.png" if self.path == "/logo.png" else "icon.svg" if self.path == "/logo.svg" else self.path.lstrip("/")
+            self.write_asset(APP_ROOT / asset_name)
             return
         if is_mcp_path(self.path):
             if not self.authorized():
