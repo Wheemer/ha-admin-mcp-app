@@ -343,8 +343,10 @@ def mcp_instructions() -> str:
     title = advertised_server_title()
     return (
         f"{title}. This MCP server controls exactly this Home Assistant target. "
+        f"Advertised MCP server name is {advertised_server_name()}; target label is {advertised_target_label()}; target host hint is {advertised_target_hint() or 'not set'}. "
         "Use get_target_identity or ha://mcp/identity before risky work if there is any ambiguity. "
-        "Use normal MCP tools/list and tools/call for discovery and execution; list_tools/search_tools are fallback catalog helpers. "
+        "Use normal MCP tools/list and tools/call for discovery and execution; list_tools/search_tools/ha_mcp_core_tools are fallback catalog helpers. "
+        "If a client does not expose this server as native tools, call mcp_call_tool or ha_mcp_call_tool with {name, arguments}. "
         "Prefer direct add-on, Home Assistant, Frigate, go2rtc, Lovelace, registry, automation, and trace tools over shell commands. "
         "This server is intentionally privileged and dangerous; writes/restarts/deletes require explicit force gates where applicable."
     )
@@ -3244,9 +3246,11 @@ def structured_tool_error(err: Exception, tool_name: str | None = None, args: di
 
 
 def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
-    target = args.get("name") or args.get("tool")
+    if not isinstance(args, dict):
+        raise ValueError("Proxy tool arguments must be an object with name/tool and optional arguments")
+    target = args.get("name") or args.get("tool") or args.get("tool_name")
     if not target:
-        raise ValueError("name is required")
+        raise ValueError("name is required; expected {'name':'tool_name','arguments':{...}}")
     target_name = str(target)
     if target_name in {proxy_name, "call_tool", "mcp_call_tool", "ha_mcp_call_tool", "batch_call_tools", "ha_call_read_tool", "ha_call_write_tool", "ha_call_delete_tool"}:
         raise ValueError("Refusing recursive proxy tool call")
@@ -3254,7 +3258,23 @@ def proxy_call_tool(args: dict[str, Any], proxy_name: str) -> Any:
     if target_name not in known:
         matches = search_tools(target_name, 10).get("matches", [])
         raise ValueError(f"Unknown tool {target_name!r}. Matching tools: {[match['name'] for match in matches]}")
-    return call_tool(target_name, args.get("arguments") or {})
+    tool_args = args.get("arguments")
+    if tool_args is None:
+        tool_args = args.get("args")
+    if tool_args is None:
+        tool_args = args.get("input")
+    if tool_args is None:
+        tool_args = {key: value for key, value in args.items() if key not in {"name", "tool", "tool_name", "arguments", "args", "input"}}
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"arguments must be an object or JSON object string: {err}") from err
+    if tool_args is None:
+        tool_args = {}
+    if not isinstance(tool_args, dict):
+        raise ValueError("arguments must be an object")
+    return call_tool(target_name, tool_args)
 
 
 def batch_call_tools(args: dict[str, Any]) -> dict[str, Any]:
@@ -3359,6 +3379,7 @@ def mcp_advertisement() -> dict[str, Any]:
             "port": MCP_PORT,
             "tool_discovery": "tools/list",
             "tool_call": "tools/call",
+            "fallback_tool_call": {"method": "tools/call", "params": {"name": "mcp_call_tool", "arguments": {"name": "get_target_identity", "arguments": {}}}},
         },
         "tool_counts": {
             "native": len(native_tools()),
@@ -3368,6 +3389,8 @@ def mcp_advertisement() -> dict[str, Any]:
         },
         "codex_notes": [
             "If Codex does not expose native mcp__... tools, call tools/list on this endpoint or use list_tools/search_tools through tools/call.",
+            "If native tool wrappers are stale, call force_tool_catalog_refresh, then call new tools through mcp_call_tool until the client refreshes wrappers.",
+            "tools/call accepts params.name plus params.arguments; the legacy handler also accepts tool/tool_name and args/input aliases and returns error.data with schema guidance on malformed calls.",
             "If Codex points to /api/mcp, that is the wrong path for this add-on; use the private 9583 path reported here.",
             "Use get_target_identity before writes when multiple Home Assistant MCP servers are configured.",
         ],
@@ -9477,6 +9500,8 @@ class Handler(BaseHTTPRequestHandler):
         return self.handle_rpc(message)
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(request, dict):
+            return self.rpc_error(None, -32600, "Invalid Request", {"received_type": type(request).__name__, "expected": "JSON-RPC request object"})
         request_id = request.get("id")
         method = request.get("method")
         try:
@@ -9531,12 +9556,16 @@ class Handler(BaseHTTPRequestHandler):
             elif method in ("resources/subscribe", "resources/unsubscribe"):
                 result = {}
             elif method == "tools/call":
-                params = request.get("params") or {}
+                try:
+                    params = self.normalize_tools_call_params(request.get("params"))
+                except ValueError as err:
+                    return self.rpc_error(request_id, -32602, str(err), self.tools_call_shape_help(request.get("params")))
                 tool_name = params.get("name")
                 if not tool_name:
-                    return self.rpc_error(request_id, -32602, "Tool name is required")
+                    return self.rpc_error(request_id, -32602, "Tool name is required", self.tools_call_shape_help(params))
                 if tool_name not in TOOL_NAMES:
-                    return self.rpc_error(request_id, -32602, f"Unknown tool: {tool_name}")
+                    matches = search_tools(str(tool_name), 8).get("matches", [])
+                    return self.rpc_error(request_id, -32602, f"Unknown tool: {tool_name}", {"similar_tools": [match.get("name") for match in matches], "catalog_hash": tool_catalog_fingerprint(), "target": {"label": advertised_target_label(), "host_hint": advertised_target_hint()}})
                 try:
                     tool_value = call_tool(tool_name, params.get("arguments") or {})
                     result = tool_value if is_mcp_content_result(tool_value) else text_result(tool_value)
@@ -9559,15 +9588,61 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as err:
             if request_id is None:
                 return None
-            return self.rpc_error(request_id, -32000, str(err))
+            return self.rpc_error(request_id, -32000, str(err), structured_tool_error(err, None, {}))
 
-    def rpc_error(self, request_id: Any, code: int, message: str) -> dict[str, Any] | None:
+    def normalize_tools_call_params(self, params: Any) -> dict[str, Any]:
+        if params is None:
+            raise ValueError("tools/call params are required")
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError as err:
+                raise ValueError(f"tools/call params must be an object or JSON object string: {err}") from err
+        if not isinstance(params, dict):
+            raise ValueError("tools/call params must be an object")
+        if "params" in params and isinstance(params["params"], dict) and not (params.get("name") or params.get("tool")):
+            params = params["params"]
+        name = params.get("name") or params.get("tool") or params.get("tool_name")
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = params.get("args")
+        if arguments is None:
+            arguments = params.get("input")
+        if arguments is None:
+            arguments = {key: value for key, value in params.items() if key not in {"name", "tool", "tool_name", "arguments", "args", "input"}}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError as err:
+                raise ValueError(f"tools/call arguments must be an object or JSON object string: {err}") from err
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise ValueError("tools/call arguments must be an object")
+        return {"name": name, "arguments": arguments}
+
+    def tools_call_shape_help(self, received: Any) -> dict[str, Any]:
+        return {
+            "expected": {"method": "tools/call", "params": {"name": "get_target_identity", "arguments": {}}},
+            "accepted_aliases": {"tool_name": "name", "tool": "name", "args": "arguments", "input": "arguments"},
+            "fallback_tool": {"name": "mcp_call_tool", "arguments": {"name": "get_target_identity", "arguments": {}}},
+            "received_type": type(received).__name__,
+            "received_keys": sorted(received.keys()) if isinstance(received, dict) else None,
+            "target": {"label": advertised_target_label(), "host_hint": advertised_target_hint(), "server_name": advertised_server_name()},
+            "catalog_hash": tool_catalog_fingerprint(),
+            "diagnostic_tools": ["get_target_identity", "mcp_advertisement", "force_tool_catalog_refresh", "ha_mcp_core_tools", "list_tools"],
+        }
+
+    def rpc_error(self, request_id: Any, code: int, message: str, data: Any | None = None) -> dict[str, Any] | None:
         if request_id is None:
             return None
+        error: dict[str, Any] = {"code": code, "message": redact_secrets(message)}
+        if data is not None:
+            error["data"] = sanitize_metadata(data)
         return {
             "jsonrpc": "2.0",
             "id": request_id,
-            "error": {"code": code, "message": redact_secrets(message)},
+            "error": error,
         }
 
     def write_json(self, payload: Any, status: int = 200, headers: dict[str, str] | None = None) -> None:
