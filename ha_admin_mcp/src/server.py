@@ -22,6 +22,7 @@ import glob
 import hashlib
 import functools
 import gzip
+import logging
 import socket
 import struct
 from datetime import datetime, timedelta, timezone
@@ -9392,6 +9393,7 @@ def build_fastmcp_server():
 def run_fastmcp_server(host: str) -> None:
     from starlette.middleware import Middleware
 
+    logging.getLogger("fastmcp.server.mixins.transport").setLevel(logging.WARNING)
     mcp = build_fastmcp_server()
     print(
         "[ha-admin-mcp] EXTREMELY DANGEROUS FastMCP server listening on "
