@@ -3581,7 +3581,13 @@ def diagnostic_bundle(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("dashboard_url_path"):
         dashboard_args["url_path"] = args["dashboard_url_path"]
     if dashboard_args:
-        result["dashboard_outline"] = get_lovelace_dashboard_outline(dashboard_args)
+        try:
+            result["dashboard_outline"] = live_lovelace_get_outline(dashboard_args)
+            result["dashboard_outline_source"] = "live"
+        except Exception as live_err:
+            result["dashboard_outline"] = get_lovelace_dashboard_outline(dashboard_args)
+            result["dashboard_outline_source"] = "storage"
+            result["dashboard_live_outline_error"] = str(live_err)
     return result
 
 
