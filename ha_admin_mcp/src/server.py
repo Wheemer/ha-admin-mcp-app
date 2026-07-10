@@ -136,7 +136,7 @@ def load_options() -> dict[str, Any]:
         "bind_host": os.environ.get("BIND_HOST", "0.0.0.0"),
         "secret_path": os.environ.get("SECRET_PATH", ""),
         "command_timeout_seconds": int(os.environ.get("COMMAND_TIMEOUT_SECONDS", "300")),
-        "native_toolset": os.environ.get("NATIVE_TOOLSET", "full"),
+        "native_toolset": os.environ.get("NATIVE_TOOLSET", "standard"),
         "mcp_runtime": os.environ.get("MCP_RUNTIME", "fastmcp"),
         "frigate_url": os.environ.get("FRIGATE_URL", ""),
         "go2rtc_url": os.environ.get("GO2RTC_URL", ""),
@@ -2335,7 +2335,7 @@ BOOTSTRAP_NATIVE_TOOL_NAMES = {
 
 
 def native_toolset_mode() -> str:
-    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "full").lower()
+    mode = str(OPTIONS.get("native_toolset") or os.environ.get("NATIVE_TOOLSET") or "standard").lower()
     return mode if mode in {"bootstrap", "standard", "upstream", "full"} else "standard"
 
 
