@@ -5376,7 +5376,23 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             if bool(args.get("list_only") or args.get("list")):
                 return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
             if any(args.get(key) is not None for key in ("entity", "entity_id", "card_type", "custom_type", "heading", "title", "name", "query", "path", "view_index", "view_title", "view_path")):
-                return find_lovelace_cards(dash_args)
+                try:
+                    return live_lovelace_find_cards(dash_args)
+                except Exception:
+                    return find_lovelace_cards(dash_args)
+            if (not dash_args.get("id") and not dash_args.get("key") and dash_args.get("url_path") in (None, "", "lovelace", "default")):
+                try:
+                    config = live_lovelace_config(dash_args)
+                    return {
+                        "item": {"id": "lovelace", "url_path": "lovelace", "title": "Overview", "mode": "storage"},
+                        "key": "lovelace",
+                        "path": str(storage_path("lovelace")),
+                        "exists": storage_path("lovelace").exists(),
+                        "live": True,
+                        "data": {"config": config},
+                    }
+                except Exception:
+                    pass
             return get_lovelace_dashboard(dash_args, int(args.get("max_bytes") or MAX_READ_BYTES))
         if name == "ha_config_set_dashboard":
             return save_lovelace_dashboard(dash_args)
@@ -8263,7 +8279,7 @@ def live_lovelace_get_card(args: dict[str, Any]) -> dict[str, Any]:
     matches = live_lovelace_find_card_rows(config, args)
     expected = int(args.get("expected_matches") or 1)
     if len(matches) != expected:
-        return {"preferred_path": True, "count": len(matches), "error": f"Expected {expected} card match(es), found {len(matches)}", "matches": matches}
+        return {"preferred_path": True, "count": len(matches), "error": f"Expected {expected} card match(es), found {len(matches)}", "matches": compact_lovelace_matches(matches, bool(args.get("include_config")))}
     if expected != 1:
         raise ValueError("live_lovelace_get_card requires expected_matches=1")
     path = matches[0]["path"]
@@ -8279,7 +8295,7 @@ def live_lovelace_patch_card(args: dict[str, Any]) -> dict[str, Any]:
     matches = live_lovelace_find_card_rows(config, args)
     expected = int(args.get("expected_matches") or 1)
     if len(matches) != expected:
-        return {"preferred_path": True, "changed": False, "error": f"Expected {expected} match(es), found {len(matches)}", "matches": matches}
+        return {"preferred_path": True, "changed": False, "error": f"Expected {expected} match(es), found {len(matches)}", "matches": compact_lovelace_matches(matches, bool(args.get("include_config")))}
     if expected != 1:
         raise ValueError("live_lovelace_patch_card requires expected_matches=1")
     path = matches[0]["path"]
@@ -8726,7 +8742,7 @@ def get_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
     matches = search["matches"]
     expected = int(args.get("expected_matches") or 1)
     if len(matches) != expected:
-        return {"item": item, "key": key, "count": len(matches), "error": f"Expected {expected} card match(es), found {len(matches)}", "matches": matches}
+        return {"item": item, "key": key, "count": len(matches), "error": f"Expected {expected} card match(es), found {len(matches)}", "matches": compact_lovelace_matches(matches, bool(args.get("include_config")))}
     if expected != 1:
         raise ValueError("get_lovelace_card currently requires expected_matches=1")
     target_path = matches[0]["path"]
