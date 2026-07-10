@@ -2312,6 +2312,35 @@ CORE_ADMIN_TOOL_CATEGORIES = {
     "automations": ["list_automation_configs", "get_automation_config", "get_automation", "patch_automation", "list_blueprints", "read_blueprint", "search_blueprints", "patch_blueprint", "automation_diagnostics", "list_traces", "get_trace", "test_automation_trace", "ha_config_get_automation", "ha_config_set_automation"],
 }
 
+STANDARD_NATIVE_TOOL_NAMES = {
+    "diagnostic_bundle",
+    "ha_config_get_dashboard",
+    "ha_config_set_dashboard",
+    "ha_config_list_dashboard_resources",
+    "ha_config_set_dashboard_resource",
+    "live_lovelace_resources",
+    "list_lovelace_resources",
+    "set_lovelace_resource",
+    "verify_custom_card_resource",
+    "deploy_custom_card_bundle",
+    "upload_file_start",
+    "upload_file_chunk",
+    "upload_file_status",
+    "upload_file_finalize",
+    "list_lovelace_dashboards",
+    "get_lovelace_dashboard",
+    "get_lovelace_dashboard_outline",
+    "find_lovelace_cards",
+    "get_lovelace_card",
+    "patch_lovelace_card",
+    "live_lovelace_get_config",
+    "live_lovelace_get_outline",
+    "live_lovelace_find_cards",
+    "live_lovelace_get_card",
+    "live_lovelace_patch_card",
+    "live_lovelace_save_config",
+}
+
 
 BOOTSTRAP_NATIVE_TOOL_NAMES = {
     "ha_mcp_status",
@@ -2350,6 +2379,7 @@ def native_tool_names() -> set[str]:
     names |= BOOTSTRAP_NATIVE_TOOL_NAMES
     if mode == "standard":
         names |= set(HA_ADMIN_COMPAT_EXTENSION_TOOL_NAME_SET)
+        names |= STANDARD_NATIVE_TOOL_NAMES
     if mode == "bootstrap":
         names = set(BOOTSTRAP_NATIVE_TOOL_NAMES)
     return names
@@ -5320,10 +5350,21 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
             "id": args.get("dashboard_id") or args.get("id") or args.get("identifier"),
             "url_path": args.get("url_path"),
             "key": args.get("key"),
+            "entity": args.get("entity") or args.get("entity_id"),
+            "card_type": args.get("card_type"),
+            "custom_type": args.get("custom_type"),
+            "title": args.get("title") or args.get("heading"),
+            "name": args.get("name"),
+            "query": args.get("query"),
+            "path": args.get("path"),
+            "view_index": args.get("view_index"),
+            "view_title": args.get("view_title"),
+            "view_path": args.get("view_path"),
+            "limit": args.get("limit"),
+            "include_config": bool(args.get("include_config")),
             "config": args.get("config"),
             "data": args.get("data"),
             "content": args.get("content"),
-            "title": args.get("title"),
             "create": bool(args.get("create", True)),
             "backup": bool(args.get("backup", True)),
             "dry_run": bool(args.get("dry_run")),
@@ -5334,6 +5375,8 @@ def call_upstream_compat_tool(name: str, args: dict[str, Any]) -> Any:
         if name == "ha_config_get_dashboard":
             if bool(args.get("list_only") or args.get("list")):
                 return list_lovelace_dashboards(bool(args.get("include_config")), int(args.get("max_bytes") or MAX_READ_BYTES))
+            if any(args.get(key) is not None for key in ("entity", "entity_id", "card_type", "custom_type", "heading", "title", "name", "query", "path", "view_index", "view_title", "view_path")):
+                return find_lovelace_cards(dash_args)
             return get_lovelace_dashboard(dash_args, int(args.get("max_bytes") or MAX_READ_BYTES))
         if name == "ha_config_set_dashboard":
             return save_lovelace_dashboard(dash_args)
@@ -7021,11 +7064,11 @@ def check_config_and_reload(args: dict[str, Any]) -> dict[str, Any]:
 def storage_path(key: str) -> Path:
     if "/" in key or "\\" in key:
         raise ValueError("Invalid storage key")
-    return Path("/config/.storage") / key
+    return CONFIG_ROOT / ".storage" / key
 
 
 def list_storage_keys(include_backups: bool) -> list[dict[str, Any]]:
-    storage = Path("/config/.storage")
+    storage = CONFIG_ROOT / ".storage"
     rows = []
     for path in sorted(storage.iterdir()):
         if not include_backups and (".bak" in path.name or "backup" in path.name):
@@ -8171,7 +8214,7 @@ def live_lovelace_get_outline(args: dict[str, Any]) -> dict[str, Any]:
 def live_lovelace_find_cards(args: dict[str, Any]) -> dict[str, Any]:
     config = live_lovelace_config(args)
     matches = live_lovelace_find_card_rows(config, args)
-    return {"preferred_path": True, "searched_nested": True, "count": len(matches), "matches": matches}
+    return {"preferred_path": True, "searched_nested": True, "count": len(matches), "matches": compact_lovelace_matches(matches, bool(args.get("include_config")))}
 
 
 def live_lovelace_find_card_rows(config: dict[str, Any], args: dict[str, Any]) -> list[dict[str, Any]]:
@@ -8352,16 +8395,32 @@ def dashboard_item_key(item: dict[str, Any]) -> str:
     return lovelace_dashboard_key(item["id"])
 
 
+def default_lovelace_item(registry: dict[str, Any]) -> dict[str, Any] | None:
+    path = storage_path("lovelace")
+    if path.exists():
+        return {"id": "lovelace", "url_path": "lovelace", "title": "Overview", "mode": "storage"}
+    for candidate in registry.get("data", {}).get("items", []):
+        if candidate.get("id") == "lovelace" or candidate.get("url_path") in ("lovelace", "default"):
+            return candidate
+    return None
+
+
 def resolve_lovelace_dashboard(args: dict[str, Any], allow_missing: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
     registry = load_lovelace_registry()
     items = registry["data"]["items"]
     wanted_id = args.get("id")
     wanted_url = args.get("url_path")
     wanted_key = args.get("key")
-    if wanted_key == "lovelace" or wanted_id == "lovelace" or wanted_url in ("lovelace", "default", ""):
-        path = storage_path("lovelace")
-        if path.exists():
-            return registry, {"id": "lovelace", "url_path": None, "title": "Default Lovelace", "mode": "storage"}
+    default_requested = (
+        wanted_key == "lovelace"
+        or wanted_id in ("lovelace", "default")
+        or wanted_url in ("lovelace", "default", "")
+        or (wanted_id is None and wanted_url is None and wanted_key is None and not allow_missing)
+    )
+    if default_requested:
+        item = default_lovelace_item(registry)
+        if item:
+            return registry, item
         if not allow_missing:
             return registry, None
     if wanted_key and not wanted_id:
@@ -8599,10 +8658,10 @@ def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
         wanted_type = f"custom:{wanted_type}"
     if wanted_type and row.get("type") != wanted_type:
         return False
-    title_filter = str(args.get("title") or args.get("name") or "").lower()
+    title_filter = str(args.get("title") or args.get("name") or args.get("heading") or "").lower()
     if title_filter and title_filter not in str(row.get("title") or "").lower():
         return False
-    wanted_entity = str(args.get("entity") or "")
+    wanted_entity = str(args.get("entity") or args.get("entity_id") or "")
     row_entities = [str(entity) for entity in row.get("entities", [])]
     if wanted_entity and wanted_entity not in row_entities:
         return False
@@ -8620,6 +8679,19 @@ def card_matches(row: dict[str, Any], args: dict[str, Any]) -> bool:
         if not any(query in item.lower() for item in haystack):
             return False
     return True
+
+
+def compact_lovelace_matches(matches: list[dict[str, Any]], include_config: bool = False) -> list[dict[str, Any]]:
+    if include_config:
+        return matches
+    return [
+        {
+            key: value
+            for key, value in row.items()
+            if key != "card"
+        }
+        for row in matches
+    ]
 
 
 def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
@@ -8644,8 +8716,8 @@ def find_lovelace_cards(args: dict[str, Any]) -> dict[str, Any]:
                 row["view_path"] = view.get("path") if isinstance(view, dict) else None
                 matches.append(row)
                 if len(matches) >= limit:
-                    return {"item": item, "key": key, "searched_nested": True, "count": len(matches), "matches": matches}
-    return {"item": item, "key": key, "searched_nested": True, "count": len(matches), "matches": matches}
+                    return {"item": item, "key": key, "searched_nested": True, "count": len(matches), "matches": compact_lovelace_matches(matches, bool(args.get("include_config")))}
+    return {"item": item, "key": key, "searched_nested": True, "count": len(matches), "matches": compact_lovelace_matches(matches, bool(args.get("include_config")))}
 
 
 def get_lovelace_card(args: dict[str, Any]) -> dict[str, Any]:
